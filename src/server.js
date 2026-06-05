@@ -34,6 +34,8 @@ const getProfile = (uid) => db.prepare('SELECT * FROM profiles WHERE user_id=?')
 const listStaff = () => db.prepare(`SELECT u.id,u.email,u.role,p.* FROM users u
   LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role IN ('staff','manager') ORDER BY p.full_name, u.email`).all();
 const listDocs = (uid) => db.prepare('SELECT * FROM documents WHERE user_id=? ORDER BY uploaded_at DESC').all(uid);
+const listEmployment = (uid) => db.prepare('SELECT * FROM employment_history WHERE user_id=? ORDER BY from_date DESC, id DESC').all(uid);
+const listReferences = (uid) => db.prepare('SELECT * FROM reference_checks WHERE user_id=? ORDER BY created_at DESC').all(uid);
 
 seedAdmin();
 if (process.env.SEED_DEMO === '1') seedDemo();
@@ -160,6 +162,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
   if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
   const u = getUser(req.params.id); if (!u) return res.status(404).send('Not found');
   const p = getProfile(u.id); const c = computeCompliance(p); const docs = listDocs(u.id);
+  const emp = listEmployment(u.id); const refs = listReferences(u.id);
   const canEdit = req.user.role === 'admin' || req.user.role === 'manager' || req.user.id === u.id;
   const sectNav = PROFILE_SECTIONS.map((s) => `<a href="#${s.id}">${esc(s.title)}</a>`).join('');
   const sections = PROFILE_SECTIONS.map((s) => `
@@ -187,6 +190,34 @@ app.get('/staff/:id', requireAuth, (req, res) => {
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Documents
     ${canEdit ? `<a class="btn ghost sm" href="/staff/${u.id}/edit#documents">Upload</a>` : ''}</div>
     <div class="card-b" style="padding:0">${docs.length ? `<table class="tbl"><thead><tr><th>Type</th><th>Title</th><th>Expiry</th><th></th></tr></thead><tbody>${docRows}</tbody></table>` : '<div class="card-b muted">No documents uploaded yet.</div>'}</div></div>
+  <div class="card" style="margin-bottom:1rem"><div class="card-h">Employment history <span class="muted small">CQC Schedule 3</span></div>
+    <div class="card-b" style="padding:0">
+    <table class="tbl"><thead><tr><th>Employer</th><th>Role</th><th>From</th><th>To</th><th>Care role</th><th>Reason for leaving</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>
+    ${emp.map((e) => `<tr><td><b>${esc(e.employer)}</b>${e.gap_explanation ? `<div class="muted small">Gap: ${esc(e.gap_explanation)}</div>` : ''}</td><td>${esc(e.job_title)}</td><td>${fmtDate(e.from_date)}</td><td>${e.to_date ? fmtDate(e.to_date) : 'Present'}</td><td>${e.is_care_role ? '<span class="badge blue">Care</span>' : '—'}</td><td class="muted">${esc(e.reason_for_leaving)}</td>${canEdit ? `<td><a href="/staff/${u.id}/employment/${e.id}/delete" onclick="return confirm('Delete this entry?')">Delete</a></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canEdit ? 7 : 6}" class="muted" style="padding:1rem">No employment history recorded.</td></tr>`}
+    </tbody></table>
+    ${canEdit ? `<form method="post" action="/staff/${u.id}/employment" class="card-b" style="border-top:1px solid var(--line-2)"><div class="form-grid">
+      <div class="field"><label>Employer</label><input name="employer" required></div>
+      <div class="field"><label>Role</label><input name="job_title"></div>
+      <div class="field"><label>From</label><input type="date" name="from_date"></div>
+      <div class="field"><label>To (blank = current)</label><input type="date" name="to_date"></div>
+      <div class="field"><label>Reason for leaving</label><input name="reason_for_leaving"></div>
+      <div class="field"><label>Explanation of any gap</label><input name="gap_explanation"></div>
+    </div><div class="checkrow"><input type="checkbox" id="care_role" name="is_care_role" value="1"><label for="care_role">Care / health &amp; social care role</label></div>
+    <button class="btn sm">Add employment</button></form>` : ''}
+    </div></div>
+  <div class="card" style="margin-bottom:1rem"><div class="card-h">References <span class="muted small">at least two, inc. most recent employer</span></div>
+    <div class="card-b" style="padding:0">
+    <table class="tbl"><thead><tr><th>Referee</th><th>Organisation</th><th>Relationship</th><th>Recent employer</th><th>Status</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>
+    ${refs.map((r) => `<tr><td><b>${esc(r.referee_name)}</b></td><td>${esc(r.referee_org)}</td><td>${esc(r.relationship)}</td><td>${r.is_most_recent_employer ? 'Yes' : '—'}</td><td>${levelBadge(r.status === 'received' ? 'ok' : r.status === 'rejected' ? 'expired' : 'warning', r.status)}</td>${canEdit ? `<td><a href="/staff/${u.id}/references/${r.id}/delete" onclick="return confirm('Delete this reference?')">Delete</a></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canEdit ? 6 : 5}" class="muted" style="padding:1rem">No references recorded.</td></tr>`}
+    </tbody></table>
+    ${canEdit ? `<form method="post" action="/staff/${u.id}/references" class="card-b" style="border-top:1px solid var(--line-2)"><div class="form-grid">
+      <div class="field"><label>Referee name</label><input name="referee_name" required></div>
+      <div class="field"><label>Organisation</label><input name="referee_org"></div>
+      <div class="field"><label>Relationship</label><input name="relationship" placeholder="e.g. Former line manager"></div>
+      <div class="field"><label>Status</label><select name="status"><option value="requested">Requested</option><option value="received">Received</option><option value="rejected">Rejected</option></select></div>
+    </div><div class="checkrow"><input type="checkbox" id="recent_emp" name="is_most_recent_employer" value="1"><label for="recent_emp">Most recent employer</label></div>
+    <button class="btn sm">Add reference</button></form>` : ''}
+    </div></div>
   <div class="sectnav">${sectNav}</div>
   ${sections}`;
   res.send(layout({ user: req.user, title: p.full_name || 'Record', active: '/staff', body }));
@@ -291,6 +322,34 @@ app.get('/documents/:id/delete', requireAuth, (req, res) => {
   db.prepare('DELETE FROM documents WHERE id=?').run(d.id);
   audit(req.user, 'delete_document', d.user_id);
   res.redirect(`/staff/${d.user_id}`);
+});
+
+// ---- employment history & references ---------------------------------------
+app.post('/staff/:id/employment', requireAuth, (req, res) => {
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  db.prepare('INSERT INTO employment_history (user_id,employer,job_title,from_date,to_date,is_care_role,reason_for_leaving,gap_explanation,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(req.params.id, req.body.employer || '', req.body.job_title || '', req.body.from_date || '', req.body.to_date || '', req.body.is_care_role ? 1 : 0, req.body.reason_for_leaving || '', req.body.gap_explanation || '', Date.now());
+  audit(req.user, 'add_employment', Number(req.params.id));
+  res.redirect(`/staff/${req.params.id}`);
+});
+app.get('/staff/:id/employment/:eid/delete', requireAuth, (req, res) => {
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  db.prepare('DELETE FROM employment_history WHERE id=? AND user_id=?').run(req.params.eid, req.params.id);
+  audit(req.user, 'delete_employment', Number(req.params.id));
+  res.redirect(`/staff/${req.params.id}`);
+});
+app.post('/staff/:id/references', requireAuth, (req, res) => {
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  db.prepare('INSERT INTO reference_checks (user_id,referee_name,referee_org,relationship,is_most_recent_employer,status,created_at) VALUES (?,?,?,?,?,?,?)')
+    .run(req.params.id, req.body.referee_name || '', req.body.referee_org || '', req.body.relationship || '', req.body.is_most_recent_employer ? 1 : 0, req.body.status || 'requested', Date.now());
+  audit(req.user, 'add_reference', Number(req.params.id));
+  res.redirect(`/staff/${req.params.id}`);
+});
+app.get('/staff/:id/references/:rid/delete', requireAuth, (req, res) => {
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  db.prepare('DELETE FROM reference_checks WHERE id=? AND user_id=?').run(req.params.rid, req.params.id);
+  audit(req.user, 'delete_reference', Number(req.params.id));
+  res.redirect(`/staff/${req.params.id}`);
 });
 
 // ---- alerts ----------------------------------------------------------------
