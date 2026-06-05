@@ -17,6 +17,7 @@ import {
 } from './compliance.js';
 import { seedAdmin, seedDemo } from './seed.js';
 import { streamZip, pdfBuffer, writeSummary } from './export.js';
+import { startScheduler, sendDigest, mailConfigured, recipients, lastSentAt } from './reminders.js';
 import { layout, loginPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon } from './views.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,7 @@ const listReferences = (uid) => db.prepare('SELECT * FROM reference_checks WHERE
 
 seedAdmin();
 if (process.env.SEED_DEMO === '1') seedDemo();
+startScheduler();
 
 app.use(attachUser);
 app.get('/healthz', (_req, res) => res.type('text').send('ok'));
@@ -380,6 +382,13 @@ app.get('/alerts', requireRole('admin', 'manager'), (req, res) => {
   rows.sort((x, y) => x.a.days - y.a.days);
   const body = `
   <div class="page-head"><div><h1>Compliance alerts</h1><p class="muted">${rows.length} renewals expired or due soon</p></div></div>
+  ${req.query.reminder === 'sent' ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#1a7f4b">✓ Reminder digest emailed to ${esc(req.query.n || '')} recipient(s).</div></div>` : ''}
+  ${req.query.reminder === 'error' ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#b42318">Could not send: ${esc(req.query.msg || '')}</div></div>` : ''}
+  <div class="card" style="margin-bottom:1rem"><div class="card-h">Email reminders ${mailConfigured() ? '<span class="badge green">Active</span>' : '<span class="badge amber">Not configured</span>'}</div>
+    <div class="card-b" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+      <div class="small muted">${mailConfigured() ? `Daily digest to: ${esc(recipients().join(', '))}.${lastSentAt() ? ` Last sent ${new Date(lastSentAt()).toLocaleString('en-GB')}.` : ' Not sent yet.'}` : 'Add the info@skyhomeliving.co.uk SMTP settings to enable automatic daily reminders.'}</div>
+      <form method="post" action="/admin/send-reminders"><button class="btn sm" ${mailConfigured() ? '' : 'disabled'}>Send reminders now</button></form>
+    </div></div>
   <div class="card"><div class="card-b" style="padding:0">
   <table class="tbl"><thead><tr><th>Staff</th><th>Requirement</th><th>Date</th><th>Status</th></tr></thead><tbody>
   ${rows.map(({ s, a }) => `<tr onclick="location='/staff/${s.id}'" style="cursor:pointer">
@@ -388,6 +397,13 @@ app.get('/alerts', requireRole('admin', 'manager'), (req, res) => {
     || '<tr><td colspan="4" class="muted" style="padding:1rem">No alerts — everyone is up to date.</td></tr>'}
   </tbody></table></div></div>`;
   res.send(layout({ user: req.user, title: 'Alerts', active: '/alerts', body }));
+});
+
+app.post('/admin/send-reminders', requireRole('admin', 'manager'), async (req, res) => {
+  let r;
+  try { r = await sendDigest(); } catch (e) { r = { sent: false, reason: e.message }; }
+  audit(req.user, 'send_reminders', null, r.sent ? `to ${r.to.length}` : r.reason);
+  res.redirect(r.sent ? `/alerts?reminder=sent&n=${r.to.length}` : `/alerts?reminder=error&msg=${encodeURIComponent(r.reason)}`);
 });
 
 // ---- invites ---------------------------------------------------------------

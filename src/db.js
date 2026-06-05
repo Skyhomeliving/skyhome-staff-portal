@@ -145,6 +145,11 @@ db.exec(`
     received_at TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
 `);
 
 // --- Additive compliance columns on profiles (driving licence, Home Office
