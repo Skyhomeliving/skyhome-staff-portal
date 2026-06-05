@@ -16,6 +16,7 @@ import {
   PROFILE_SECTIONS, PROFILE_KEYS, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance,
 } from './compliance.js';
 import { seedAdmin, seedDemo } from './seed.js';
+import { streamZip, pdfBuffer, writeSummary } from './export.js';
 import { layout, loginPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon } from './views.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -188,7 +189,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
     <table class="tbl"><tbody>${c.alerts.map((a) => `<tr><td>${esc(a.label)}</td><td class="muted">${esc(a.area)}</td>
       <td>${fmtDate(a.date)}</td><td>${levelBadge(a.level, a.days < 0 ? `Expired ${-a.days}d ago` : `${a.days}d left`)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Documents
-    ${canEdit ? `<a class="btn ghost sm" href="/staff/${u.id}/edit#documents">Upload</a>` : ''}</div>
+    <span style="display:flex;gap:.4rem;flex-wrap:wrap">${(req.user.role === 'admin' || req.user.role === 'manager') ? `<a class="btn ghost sm" href="/staff/${u.id}/export.zip" title="ZIP of all documents + PDF summary, for CQC/HMRC">⬇ Document pack (ZIP)</a><a class="btn ghost sm" href="/staff/${u.id}/summary.pdf">Summary PDF</a>` : ''}${canEdit ? `<a class="btn ghost sm" href="/staff/${u.id}/edit#documents">Upload</a>` : ''}</span></div>
     <div class="card-b" style="padding:0">${docs.length ? `<table class="tbl"><thead><tr><th>Type</th><th>Title</th><th>Expiry</th><th></th></tr></thead><tbody>${docRows}</tbody></table>` : '<div class="card-b muted">No documents uploaded yet.</div>'}</div></div>
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Employment history <span class="muted small">CQC Schedule 3</span></div>
     <div class="card-b" style="padding:0">
@@ -322,6 +323,26 @@ app.get('/documents/:id/delete', requireAuth, (req, res) => {
   db.prepare('DELETE FROM documents WHERE id=?').run(d.id);
   audit(req.user, 'delete_document', d.user_id);
   res.redirect(`/staff/${d.user_id}`);
+});
+
+// ---- exports: compliance pack (PDF summary + ZIP of documents) -------------
+app.get('/staff/:id/summary.pdf', requireAuth, async (req, res) => {
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  const u = getUser(req.params.id); if (!u) return res.status(404).send('Not found');
+  const p = getProfile(u.id); const docs = listDocs(u.id);
+  audit(req.user, 'export_summary_pdf', u.id);
+  const buf = await pdfBuffer((doc) => writeSummary(doc, { profile: p, user: u, docs, actor: req.user }));
+  const safe = (p.full_name || u.email).replace(/[^a-z0-9]+/gi, '_');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${safe}_compliance_summary.pdf"`);
+  res.end(buf);
+});
+app.get('/staff/:id/export.zip', requireAuth, async (req, res) => {
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  const u = getUser(req.params.id); if (!u) return res.status(404).send('Not found');
+  const p = getProfile(u.id); const docs = listDocs(u.id);
+  audit(req.user, 'export_zip_pack', u.id);
+  await streamZip(res, { profile: p, user: u, docs, actor: req.user, uploadsDir: UPLOADS_DIR });
 });
 
 // ---- employment history & references ---------------------------------------
