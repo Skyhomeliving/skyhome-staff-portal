@@ -1,0 +1,22 @@
+{
+  "name": "skyhome-staff-portal",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Sky Home Living — staff compliance records (NHS/CQC/Home Office)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --experimental-sqlite src/server.js",
+    "init-db": "node src/init-db.js",
+    "build": "vite build"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.1.1"
+  }
+}
