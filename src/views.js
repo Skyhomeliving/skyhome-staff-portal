@@ -1,4 +1,5 @@
 // views.js — HTML shell, reusable components, and the login page.
+import { getBranding } from './branding.js';
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -33,6 +34,7 @@ const ICONS = {
   eye: '<path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7Zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/>',
   trash: '<path d="M6 7h12v13a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V7Zm3 2v9h2V9H9Zm4 0v9h2V9h-2ZM9 4h6l1 2h4v2H4V6h4l1-2Z"/>',
   pack: '<path d="M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3 6.5 3.6L12 11.5 5.5 7.9 12 4.3ZM5 9.6l6 3.3v6.8l-6-3.3V9.6Zm14 0v6.8l-6 3.3v-6.8l6-3.3Z"/>',
+  cog: '<path d="M19.4 13a7.8 7.8 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-1.7-1l-.4-2.5h-3.8l-.4 2.5a7.6 7.6 0 0 0-1.7 1l-2.4-1-2 3.4L4.6 11a7.8 7.8 0 0 0 0 2l-2 1.6 2 3.4 2.4-1c.5.4 1.1.7 1.7 1l.4 2.5h3.8l.4-2.5c.6-.3 1.2-.6 1.7-1l2.4 1 2-3.4-2-1.6ZM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/>',
 };
 export const icon = (n) => `<svg class="ico" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">${ICONS[n] || ''}</svg>`;
 export const miniIcon = (n) => `<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">${ICONS[n] || ''}</svg>`;
@@ -58,6 +60,7 @@ function navFor(user) {
     items.push(['/alerts', 'alert', 'Compliance alerts']);
     items.push(['/admin/invites', 'invite', 'Invitations']);
     items.push(['/admin/audit', 'audit', 'Audit log']);
+    if (user.role === 'admin') items.push(['/admin/settings', 'cog', 'Settings']);
   } else {
     items.push([`/staff/${user.id}`, 'badge', 'My record']);
   }
@@ -65,6 +68,7 @@ function navFor(user) {
 }
 
 export function layout({ user, title = 'Compliance Records', active = '/', body = '', scripts = '' }) {
+  const brand = getBranding();
   const nav = navFor(user).map(([href, ic, label]) => {
     const on = href === active || (href !== '/' && active.startsWith(href));
     return `<a href="${href}" class="${on ? 'active' : ''}">${icon(ic)}<span>${label}</span></a>`;
@@ -72,10 +76,11 @@ export function layout({ user, title = 'Compliance Records', active = '/', body 
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><meta name="theme-color" content="#0c2a4d">
-<title>${esc(title)} · Sky Home Living</title><link rel="stylesheet" href="/styles.css"></head>
+<link rel="icon" href="/favicon.png">
+<title>${esc(title)} · ${esc(brand.orgName)}</title><link rel="stylesheet" href="/styles.css"></head>
 <body><div class="app">
   <aside class="sidebar" id="sidebar">
-    <div class="brand"><div class="logo">SH</div><div><b>Sky Home Living</b><span>Compliance Records</span></div></div>
+    <div class="brand"><div class="brandmark"><img src="${brand.markLogo}" alt=""></div><div><b>${esc(brand.orgName)}</b><span>Compliance Records</span></div></div>
     <nav class="nav">${nav}</nav>
     <div class="side-foot">Signed in as<br><b style="color:#fff">${esc(user.name || user.email)}</b><br>
       <a href="/logout">${icon('logout')} Sign out</a></div>
@@ -94,13 +99,14 @@ export function layout({ user, title = 'Compliance Records', active = '/', body 
 export const roleLabel = (r) => ({ admin: 'Administrator', manager: 'Manager', staff: 'Staff' }[r] || r);
 
 export function loginPage({ error = '', message = '' } = {}) {
+  const brand = getBranding();
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
-<title>Sign in · Sky Home Living</title><link rel="stylesheet" href="/styles.css"></head>
+<link rel="icon" href="/favicon.png">
+<title>Sign in · ${esc(brand.orgName)}</title><link rel="stylesheet" href="/styles.css"></head>
 <body><div class="auth-wrap"><div class="auth-card">
-  <div class="logo">SH</div>
-  <h1 style="margin-bottom:.2rem">Sky Home Living</h1>
-  <p class="muted" style="margin-top:0">Staff Compliance Records</p>
+  <img class="login-logo" src="${brand.loginLogo}" alt="${esc(brand.orgName)}">
+  <p class="muted" style="text-align:center;margin-top:.1rem;margin-bottom:1rem">Staff Compliance Records</p>
   ${error ? `<div class="flash err">${esc(error)}</div>` : ''}
   ${message ? `<div class="flash ok">${esc(message)}</div>` : ''}
   <form method="post" action="/login">

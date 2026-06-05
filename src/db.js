@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const DATA_DIR = process.env.DATA_DIR || path.resolve('data');
+export const DATA_DIR = process.env.DATA_DIR || path.resolve('data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 export const DB_PATH = path.join(DATA_DIR, 'data.db');
 export const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');

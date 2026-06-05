@@ -18,6 +18,7 @@ import {
 import { seedAdmin, seedDemo } from './seed.js';
 import { streamZip, pdfBuffer, writeSummary } from './export.js';
 import { startScheduler, sendDigest, mailConfigured, recipients, lastSentAt } from './reminders.js';
+import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js';
 import { layout, loginPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, fileKind, fileExt } from './views.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -45,6 +46,7 @@ startScheduler();
 
 app.use(attachUser);
 app.get('/healthz', (_req, res) => res.type('text').send('ok'));
+app.get('/branding/logo', (_req, res) => { const p = customLogoPath(); if (!p) return res.status(404).end(); res.sendFile(p); });
 
 // ---- auth ------------------------------------------------------------------
 app.get('/login', (req, res) => res.send(loginPage({ message: req.query.registered ? 'Account created — please sign in.' : '' })));
@@ -493,6 +495,66 @@ app.get('/admin/audit', requireRole('admin', 'manager'), (req, res) => {
   res.send(layout({ user: req.user, title: 'Audit', active: '/admin/audit', body }));
 });
 
+// ---- settings / branding ---------------------------------------------------
+const logoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_q, _f, cb) => cb(null, BRAND_DIR),
+    filename: (_q, file, cb) => cb(null, 'logo' + path.extname(file.originalname).toLowerCase()),
+  }),
+  limits: { fileSize: 4 * 1024 * 1024 },
+  fileFilter: (_q, file, cb) => cb(null, /\.(png|jpe?g|svg|webp|gif)$/i.test(file.originalname)),
+});
+
+app.get('/admin/settings', requireRole('admin'), (req, res) => {
+  const b = getBranding();
+  const body = `
+  <div class="page-head"><div><h1>Settings</h1><p class="muted">Branding & organisation</p></div></div>
+  ${req.query.saved ? '<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#1a7f4b">✓ Saved.</div></div>' : ''}
+  ${req.query.err ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#b42318">${esc(req.query.err)}</div></div>` : ''}
+  <div class="grid cols-2">
+    <div class="card"><div class="card-h">Logo</div><div class="card-b">
+      <p class="muted small" style="margin-top:0">Shown on the sign-in screen and the sidebar. ${b.hasCustom ? 'Currently using your uploaded logo.' : 'Currently using the official Sky Home Living logo.'}</p>
+      <img class="logo-preview" src="${b.loginLogo}" alt="Current logo">
+      <form method="post" action="/admin/branding/logo" enctype="multipart/form-data" style="margin-top:1rem">
+        <div class="field"><label>Upload a new logo (PNG, JPG, SVG or WebP · max 4&nbsp;MB)</label>
+          <input type="file" name="logo" accept=".png,.jpg,.jpeg,.svg,.webp" required></div>
+        <button class="btn">Upload logo</button>
+      </form>
+      ${b.hasCustom ? `<form method="post" action="/admin/branding/logo/delete" style="margin-top:.7rem"><button class="btn ghost sm">Reset to default logo</button></form>` : ''}
+    </div></div>
+    <div class="card"><div class="card-h">Organisation name</div><div class="card-b">
+      <form method="post" action="/admin/settings">
+        <div class="field"><label>Name (shown in the header and email reminders)</label><input name="org_name" value="${esc(b.orgName)}"></div>
+        <button class="btn">Save</button>
+      </form>
+    </div></div>
+  </div>`;
+  res.send(layout({ user: req.user, title: 'Settings', active: '/admin/settings', body }));
+});
+app.post('/admin/settings', requireRole('admin'), (req, res) => {
+  brandMeta.set('org_name', (req.body.org_name || 'Sky Home Living').trim() || 'Sky Home Living');
+  audit(req.user, 'update_settings');
+  res.redirect('/admin/settings?saved=1');
+});
+app.post('/admin/branding/logo', requireRole('admin'), (req, res) => {
+  logoUpload.single('logo')(req, res, (err) => {
+    if (err) return res.redirect('/admin/settings?err=' + encodeURIComponent('Upload failed: ' + err.message));
+    if (!req.file) return res.redirect('/admin/settings?err=' + encodeURIComponent('Choose a PNG, JPG, SVG or WebP image.'));
+    for (const f of fs.readdirSync(BRAND_DIR)) if (f.startsWith('logo') && f !== req.file.filename) { try { fs.unlinkSync(path.join(BRAND_DIR, f)); } catch {} }
+    brandMeta.set('logo_file', req.file.filename);
+    brandMeta.set('logo_ver', String(Date.now()));
+    audit(req.user, 'update_logo');
+    res.redirect('/admin/settings?saved=1');
+  });
+});
+app.post('/admin/branding/logo/delete', requireRole('admin'), (req, res) => {
+  const f = brandMeta.get('logo_file');
+  if (f) { try { fs.unlinkSync(path.join(BRAND_DIR, f)); } catch {} }
+  brandMeta.del('logo_file');
+  audit(req.user, 'reset_logo');
+  res.redirect('/admin/settings?saved=1');
+});
+
 function registerPage({ error = '', code = '', email = '' }) {
   return loginPageShell(`
     <h1 style="margin-bottom:.2rem">Create your account</h1>
@@ -507,9 +569,10 @@ function registerPage({ error = '', code = '', email = '' }) {
     <p class="small muted" style="text-align:center;margin-top:1rem"><a href="/login">Back to sign in</a></p>`);
 }
 function loginPageShell(inner) {
+  const b = getBranding();
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="robots" content="noindex,nofollow"><title>Sky Home Living</title><link rel="stylesheet" href="/styles.css"></head>
-  <body><div class="auth-wrap"><div class="auth-card"><div class="logo">SH</div>${inner}</div></div></body></html>`;
+  <meta name="robots" content="noindex,nofollow"><link rel="icon" href="/favicon.png"><title>${esc(b.orgName)}</title><link rel="stylesheet" href="/styles.css"></head>
+  <body><div class="auth-wrap"><div class="auth-card"><img class="login-logo" src="${b.loginLogo}" alt="${esc(b.orgName)}">${inner}</div></div></body></html>`;
 }
 
 const PORT = process.env.PORT || 8080;
