@@ -13,12 +13,12 @@ import {
   attachUser, requireAuth, requireRole, canAccessStaff, audit, SESSION_COOKIE,
 } from './auth.js';
 import {
-  PROFILE_SECTIONS, PROFILE_KEYS, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance,
+  PROFILE_SECTIONS, PROFILE_KEYS, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance, daysUntil,
 } from './compliance.js';
 import { seedAdmin, seedDemo } from './seed.js';
 import { streamZip, pdfBuffer, writeSummary } from './export.js';
 import { startScheduler, sendDigest, mailConfigured, recipients, lastSentAt } from './reminders.js';
-import { layout, loginPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon } from './views.js';
+import { layout, loginPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, fileKind, fileExt } from './views.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -118,23 +118,31 @@ app.get('/', requireAuth, (req, res) => {
 // ---- staff list ------------------------------------------------------------
 app.get('/staff', requireRole('admin', 'manager'), (req, res) => {
   const q = String(req.query.q || '').toLowerCase();
-  let rows = listStaff().map((s) => ({ ...s, c: computeCompliance(s) }));
-  if (q) rows = rows.filter((r) => `${r.full_name} ${r.email} ${r.job_title}`.toLowerCase().includes(q));
+  const filter = String(req.query.filter || 'all');
+  let all = listStaff().map((s) => ({ ...s, c: computeCompliance(s), ndocs: db.prepare('SELECT COUNT(*) n FROM documents WHERE user_id=?').get(s.id).n }));
+  if (q) all = all.filter((r) => `${r.full_name} ${r.email} ${r.job_title}`.toLowerCase().includes(q));
+  const counts = { all: all.length, red: all.filter((r) => r.c.rag === 'red').length, amber: all.filter((r) => r.c.rag === 'amber').length, green: all.filter((r) => r.c.rag === 'green').length };
+  const rows = filter === 'all' ? all : all.filter((r) => r.c.rag === filter);
+  const qs = (f) => `?filter=${f}${q ? `&q=${encodeURIComponent(req.query.q)}` : ''}`;
+  const pill = (f, label, n) => `<a class="${filter === f ? 'on' : ''}" href="/staff${qs(f)}">${label}<span class="c">${n}</span></a>`;
+  const chip = (label, lvl) => `<span class="chip ${lvl}">${esc(label)}</span>`;
+  const dbsChip = (r) => { const s = (r.dbs_status || '').toLowerCase(); return r.dbs_status ? chip('DBS', s.includes('clear') ? 'green' : s.includes('pend') ? 'amber' : 'red') : ''; };
+  const rtwChip = (r) => { const s = (r.right_to_work_status || '').toLowerCase(); return r.right_to_work_status ? chip('RTW', s.includes('confirm') ? 'green' : s.includes('pend') ? 'amber' : 'red') : ''; };
   const body = `
-  <div class="page-head"><div><h1>Staff records</h1><p class="muted">${rows.length} shown</p></div>
+  <div class="page-head"><div><h1>Staff records</h1><p class="muted">${counts.all} staff on file</p></div>
     <a class="btn" href="/admin/invites">${icon('invite')} Invite staff</a></div>
-  <form class="card" style="margin-bottom:1rem"><div class="card-b" style="display:flex;gap:.6rem">
-    <input name="q" value="${esc(req.query.q || '')}" placeholder="Search name, email or job title" style="flex:1;padding:.5rem .6rem;border:1px solid var(--line);border-radius:8px">
-    <button class="btn ghost">Search</button></div></form>
+  <form method="get" style="margin-bottom:.8rem"><input type="hidden" name="filter" value="${esc(filter)}">
+    <input name="q" value="${esc(req.query.q || '')}" placeholder="Search name, email or job title…" style="width:100%;max-width:440px;padding:.6rem .8rem;border:1px solid var(--line);border-radius:9px;background:#fff"></form>
+  <div class="filters">${pill('all', 'All', counts.all)}${pill('red', 'Action needed', counts.red)}${pill('amber', 'Renewing soon', counts.amber)}${pill('green', 'Compliant', counts.green)}</div>
   <div class="card"><div class="card-b" style="padding:0">
-  <table class="tbl"><thead><tr><th>Name</th><th>Job title</th><th>DBS</th><th>Right to Work</th><th>Status</th></tr></thead><tbody>
+  <table class="tbl"><thead><tr><th>Name</th><th>Job title</th><th>Compliance</th><th>Docs</th><th>Status</th></tr></thead><tbody>
   ${rows.map((r) => `<tr onclick="location='/staff/${r.id}'" style="cursor:pointer">
-    <td><div style="display:flex;align-items:center;gap:.55rem"><div class="avatar">${initials(r.full_name || r.email)}</div>
+    <td><div style="display:flex;align-items:center;gap:.65rem"><div class="avatar ${avatarClass(r.full_name || r.email)}">${initials(r.full_name || r.email)}</div>
       <div><b>${esc(r.full_name || '—')}</b><div class="muted small">${esc(r.email)}</div></div></div></td>
-    <td>${esc(r.job_title || '—')}</td>
-    <td>${esc(r.dbs_status || '—')}</td>
-    <td>${esc(r.right_to_work_status || '—')}${r.is_sponsored ? ' <span class="badge blue">Sponsored</span>' : ''}</td>
-    <td>${ragBadge(r.c.rag)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted" style="padding:1rem">No staff yet.</td></tr>'}
+    <td>${esc(r.job_title || '—')}${r.is_sponsored ? '<div style="margin-top:.2rem"><span class="chip">Sponsored</span></div>' : ''}</td>
+    <td><div class="chips">${dbsChip(r)}${rtwChip(r)}${r.c.counts.expired ? chip(`${r.c.counts.expired} expired`, 'red') : ''}${r.c.counts.critical ? chip(`${r.c.counts.critical} due soon`, 'amber') : ''}${!r.c.counts.expired && !r.c.counts.critical && r.c.rag === 'green' ? chip('Up to date', 'green') : ''}</div></td>
+    <td>${r.ndocs}</td>
+    <td>${ragBadge(r.c.rag)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted" style="padding:1rem">No staff match.</td></tr>'}
   </tbody></table></div></div>`;
   res.send(layout({ user: req.user, title: 'Staff', active: '/staff', body }));
 });
@@ -174,25 +182,54 @@ app.get('/staff/:id', requireAuth, (req, res) => {
       ${s.fields.map((f) => renderViewField(f, p[f.key])).join('')}
       </div></div></div>`).join('');
 
-  const docRows = docs.map((d) => `<tr>
-    <td>${esc(categoryLabel(d.category))}</td><td>${esc(d.title || '—')}</td>
-    <td>${d.expiry_date ? fmtDate(d.expiry_date) : '—'}</td>
-    <td><a href="/documents/${d.id}">View</a>${canEdit ? ` · <a href="/documents/${d.id}/delete" onclick="return confirm('Delete this document?')">Delete</a>` : ''}</td></tr>`).join('');
+  const docRowsHtml = docs.map((d) => {
+    const kind = fileKind(d.file_path || d.mime_type);
+    const dd = d.expiry_date ? daysUntil(d.expiry_date) : null;
+    const expCls = dd == null ? '' : dd < 0 ? 'exp-over' : dd <= 60 ? 'exp-soon' : '';
+    return `<div class="doc-row">
+      <div class="fileicon ${kind}">${fileExt(d.file_path)}</div>
+      <div class="doc-meta"><div class="doc-title">${esc(d.title || categoryLabel(d.category))}</div>
+        <div class="doc-sub">${esc(categoryLabel(d.category))} · uploaded ${fmtDate(new Date(d.uploaded_at).toISOString())}${d.expiry_date ? ` · <span class="${expCls}">expires ${fmtDate(d.expiry_date)}</span>` : ''}</div></div>
+      <div class="doc-actions">
+        <a class="iconbtn" href="/documents/${d.id}" target="_blank" rel="noopener">${miniIcon('eye')} View</a>
+        <a class="iconbtn" href="/documents/${d.id}?dl=1">${miniIcon('download')} Download</a>
+        ${canEdit ? `<a class="iconbtn danger" href="/documents/${d.id}/delete" onclick="return confirm('Delete this document?')" title="Delete">${miniIcon('trash')}</a>` : ''}
+      </div></div>`;
+  }).join('');
+  const lvlDate = (s) => { const dd = daysUntil(s); return dd == null ? 'grey' : dd < 0 ? 'red' : dd <= 30 ? 'amber' : 'green'; };
+  const tile = (lbl, val, sub, lvl) => `<div class="ctile ${lvl}"><div class="lbl">${esc(lbl)}</div><div class="val">${esc(val || 'Not recorded')}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</div>`;
+  const low = (s) => (s || '').toLowerCase();
+  const dbsLvl = p.dbs_expiry ? lvlDate(p.dbs_expiry) : (low(p.dbs_status).includes('clear') ? 'green' : low(p.dbs_status).includes('pend') ? 'amber' : 'grey');
+  const rtwLvl = p.right_to_work_expiry ? lvlDate(p.right_to_work_expiry) : (low(p.right_to_work_status).includes('confirm') ? 'green' : low(p.right_to_work_status).includes('pend') ? 'amber' : 'grey');
+  const ccLvl = low(p.care_certificate_status).includes('complet') ? 'green' : low(p.care_certificate_status).includes('progress') ? 'amber' : 'grey';
+  const refLvl = low(p.references_received) === 'yes' ? 'green' : low(p.references_received) === 'partial' ? 'amber' : 'grey';
+  const tilesHtml = `<div class="cgrid">
+    ${tile('DBS', p.dbs_status, p.dbs_expiry ? `Renews ${fmtDate(p.dbs_expiry)}` : '', dbsLvl)}
+    ${tile('Right to Work', p.right_to_work_status, p.right_to_work_expiry ? `Review ${fmtDate(p.right_to_work_expiry)}` : (p.is_sponsored ? 'Sponsored worker' : ''), rtwLvl)}
+    ${tile('Care Certificate', p.care_certificate_status, p.care_certificate_date ? fmtDate(p.care_certificate_date) : '', ccLvl)}
+    ${tile('Mandatory training', p.mandatory_training_expiry ? 'Valid' : (p.mandatory_training_date ? 'Recorded' : ''), p.mandatory_training_expiry ? `Expires ${fmtDate(p.mandatory_training_expiry)}` : '', p.mandatory_training_expiry ? lvlDate(p.mandatory_training_expiry) : 'grey')}
+    ${tile('References', p.references_received, '', refLvl)}</div>`;
 
   const body = `
-  <div class="page-head">
-    <div style="display:flex;align-items:center;gap:.8rem"><div class="avatar" style="width:46px;height:46px;font-size:1rem">${initials(p.full_name || u.email)}</div>
-      <div><h1 style="margin:0">${esc(p.full_name || u.email)}</h1>
-      <p class="muted" style="margin:0">${esc(p.job_title || roleLabel(u.role))} · ${esc(u.email)}</p></div></div>
-    <div style="display:flex;gap:.5rem;align-items:center">${ragBadge(c.rag)}
-      ${canEdit ? `<a class="btn" href="/staff/${u.id}/edit">Edit record</a>` : ''}</div>
+  <div class="hero">
+    <div class="av ${avatarClass(p.full_name || u.email)}">${initials(p.full_name || u.email)}</div>
+    <div class="hero-meta">
+      <h1>${esc(p.full_name || u.email)}</h1>
+      <div class="sub">${esc(p.job_title || roleLabel(u.role))} · ${esc(u.email)}</div>
+      <div style="margin-top:.55rem;display:flex;gap:.4rem;flex-wrap:wrap">${ragBadge(c.rag)}${p.is_sponsored ? '<span class="badge">Sponsored worker</span>' : ''}${p.status && p.status !== 'active' ? `<span class="badge">${esc(p.status)}</span>` : ''}</div>
+    </div>
+    <div class="hero-actions">
+      ${(req.user.role === 'admin' || req.user.role === 'manager') ? `<a class="btn ghost" href="/staff/${u.id}/export.zip" title="ZIP of all documents + PDF summary for CQC/HMRC">${icon('pack')} Document pack</a><a class="btn ghost" href="/staff/${u.id}/summary.pdf">Summary PDF</a>` : ''}
+      ${canEdit ? `<a class="btn ghost" href="/staff/${u.id}/edit">Edit record</a>` : ''}
+    </div>
   </div>
+  ${tilesHtml}
   ${c.alerts.length ? `<div class="card" style="margin-bottom:1rem"><div class="card-h">Renewals & alerts</div><div class="card-b" style="padding:0">
     <table class="tbl"><tbody>${c.alerts.map((a) => `<tr><td>${esc(a.label)}</td><td class="muted">${esc(a.area)}</td>
       <td>${fmtDate(a.date)}</td><td>${levelBadge(a.level, a.days < 0 ? `Expired ${-a.days}d ago` : `${a.days}d left`)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
-  <div class="card" style="margin-bottom:1rem"><div class="card-h">Documents
-    <span style="display:flex;gap:.4rem;flex-wrap:wrap">${(req.user.role === 'admin' || req.user.role === 'manager') ? `<a class="btn ghost sm" href="/staff/${u.id}/export.zip" title="ZIP of all documents + PDF summary, for CQC/HMRC">⬇ Document pack (ZIP)</a><a class="btn ghost sm" href="/staff/${u.id}/summary.pdf">Summary PDF</a>` : ''}${canEdit ? `<a class="btn ghost sm" href="/staff/${u.id}/edit#documents">Upload</a>` : ''}</span></div>
-    <div class="card-b" style="padding:0">${docs.length ? `<table class="tbl"><thead><tr><th>Type</th><th>Title</th><th>Expiry</th><th></th></tr></thead><tbody>${docRows}</tbody></table>` : '<div class="card-b muted">No documents uploaded yet.</div>'}</div></div>
+  <div class="card" style="margin-bottom:1rem"><div class="card-h"><span>Documents <span class="muted small" style="font-weight:400">· ${docs.length} on file</span></span>
+    ${canEdit ? `<a class="btn ghost sm" href="/staff/${u.id}/edit#documents">Upload</a>` : ''}</div>
+    <div class="card-b" style="padding:0">${docs.length ? `<div class="doc-list">${docRowsHtml}</div>` : '<div class="card-b muted">No documents uploaded yet.</div>'}</div></div>
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Employment history <span class="muted small">CQC Schedule 3</span></div>
     <div class="card-b" style="padding:0">
     <table class="tbl"><thead><tr><th>Employer</th><th>Role</th><th>From</th><th>To</th><th>Care role</th><th>Reason for leaving</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>
@@ -316,6 +353,11 @@ app.get('/documents/:id', requireAuth, (req, res) => {
   if (!d || !canAccessStaff(req.user, d.user_id)) return res.status(403).send('Forbidden');
   const fp = path.join(UPLOADS_DIR, path.basename(d.file_path));
   if (!fs.existsSync(fp)) return res.status(404).send('File missing');
+  if (req.query.dl) {
+    const ext = path.extname(d.file_path) || '';
+    const name = `${categoryLabel(d.category)}_${d.title || 'document'}`.replace(/[^a-z0-9]+/gi, '_').replace(/_+/g, '_') + ext;
+    return res.download(fp, name);
+  }
   res.sendFile(fp);
 });
 app.get('/documents/:id/delete', requireAuth, (req, res) => {

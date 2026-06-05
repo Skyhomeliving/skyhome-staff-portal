@@ -29,8 +29,27 @@ const ICONS = {
   invite: '<path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Zm0 4-8 5-8-5V6l8 5 8-5v2Z"/>',
   audit: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm2 16H8v-2h8v2Zm0-4H8v-2h8v2Zm-3-5V3.5L18.5 9H13Z"/>',
   logout: '<path d="M16 17v-3H9v-4h7V7l5 5-5 5ZM14 2a2 2 0 0 1 2 2v2h-2V4H5v16h9v-2h2v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9Z"/>',
+  download: '<path d="M5 20h14v-2H5v2ZM19 9h-4V3H9v6H5l7 7 7-7Z"/>',
+  eye: '<path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7Zm0 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-2a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/>',
+  trash: '<path d="M6 7h12v13a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V7Zm3 2v9h2V9H9Zm4 0v9h2V9h-2ZM9 4h6l1 2h4v2H4V6h4l1-2Z"/>',
+  pack: '<path d="M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3 6.5 3.6L12 11.5 5.5 7.9 12 4.3ZM5 9.6l6 3.3v6.8l-6-3.3V9.6Zm14 0v6.8l-6 3.3v-6.8l6-3.3Z"/>',
 };
 export const icon = (n) => `<svg class="ico" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">${ICONS[n] || ''}</svg>`;
+export const miniIcon = (n) => `<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">${ICONS[n] || ''}</svg>`;
+
+export function avatarClass(s) {
+  let h = 0; const str = String(s || '');
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+  return 'a' + (h % 6);
+}
+export function fileKind(p) {
+  const s = String(p || '').toLowerCase();
+  if (/\.pdf$/.test(s) || s.includes('pdf')) return 'pdf';
+  if (/\.(jpe?g|png|webp|heic|heif|gif)$/.test(s) || s.startsWith('image/')) return 'img';
+  if (/\.docx?$/.test(s) || s.includes('word')) return 'doc';
+  return 'other';
+}
+export const fileExt = (p) => { const m = String(p || '').match(/\.([a-z0-9]{1,5})$/i); return m ? m[1].toUpperCase() : 'FILE'; };
 
 function navFor(user) {
   const items = [['/', 'dashboard', 'Dashboard']];
