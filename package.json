@@ -7,8 +7,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node --experimental-sqlite src/server.js",
-    "init-db": "node src/init-db.js",
-    "build": "vite build"
+    "init-db": "node src/init-db.js"
   },
   "engines": {
     "node": ">=22.5"
