@@ -2,7 +2,25 @@
 // the document categories that can be uploaded, and the expiry/alert engine that
 // powers the dashboard and per-staff RAG (red/amber/green) status.
 
-export const ROLES = ['admin', 'manager', 'staff'];
+// Roles, lowest → highest privilege. Three tiers drive access decisions:
+//   frontline   — carers/support workers: their own record only
+//   oversight   — coordinators: read-only view of staff & compliance
+//   management  — managers/admins: full edit; admin also owns settings
+// 'staff' is a legacy alias that behaves as frontline (migrated to 'carer' on boot).
+export const ROLES = [
+  { value: 'carer', label: 'Carer', tier: 'frontline' },
+  { value: 'support_worker', label: 'Support Worker', tier: 'frontline' },
+  { value: 'coordinator', label: 'Coordinator', tier: 'oversight' },
+  { value: 'manager', label: 'Manager', tier: 'management' },
+  { value: 'admin', label: 'Compliance / Admin', tier: 'management' },
+];
+const ROLE_TIER = Object.fromEntries(ROLES.map((r) => [r.value, r.tier]));
+export const roleTier = (role) => ROLE_TIER[role] || 'frontline';
+export const isFrontline = (role) => roleTier(role) === 'frontline';
+export const isOversight = (role) => roleTier(role) === 'oversight' || roleTier(role) === 'management';
+export const isManagerLevel = (role) => roleTier(role) === 'management';
+export const isAdmin = (role) => role === 'admin';
+export const roleLabel = (role) => ROLES.find((r) => r.value === role)?.label || (role === 'staff' ? 'Staff' : role);
 
 // Document upload categories (driving licence, sponsorship evidence, etc.)
 export const DOCUMENT_CATEGORIES = [

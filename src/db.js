@@ -214,10 +214,13 @@ function reconcileSchema() {
     last_login_at: 'INTEGER NOT NULL DEFAULT 0',
   });
   ensureColumns('profiles', NEW_PROFILE_COLUMNS);
+  ensureColumns('invite_codes', { role: "TEXT NOT NULL DEFAULT 'carer'" });
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_emphist_user ON employment_history(user_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_resets_token ON password_resets(token)');
+  // Migrate the legacy 'staff' role to the new 'carer' frontline role.
+  db.exec("UPDATE users SET role='carer' WHERE role='staff'");
 }
 reconcileSchema();
 

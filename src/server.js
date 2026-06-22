@@ -10,12 +10,14 @@ import { fileURLToPath } from 'node:url';
 import { db, UPLOADS_DIR } from './db.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession, setSessionCookie,
-  attachUser, requireAuth, requireRole, canAccessStaff, audit, SESSION_COOKIE,
+  attachUser, requireAuth, requireRole, requireOversight, requireManager, requireAdmin,
+  canAccessStaff, canEditStaff, audit, SESSION_COOKIE,
   loginLockRemaining, registerLoginFailure, registerLoginSuccess,
   createPasswordReset, getValidReset, consumePasswordReset,
 } from './auth.js';
 import {
   PROFILE_SECTIONS, PROFILE_KEYS, SELF_EDITABLE_KEYS, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance, daysUntil,
+  ROLES, isFrontline, isOversight, isManagerLevel,
 } from './compliance.js';
 import { seedAdmin, seedDemo } from './seed.js';
 import { streamZip, pdfBuffer, writeSummary } from './export.js';
@@ -40,7 +42,7 @@ const getUser = (id) => db.prepare('SELECT * FROM users WHERE id=?').get(id);
 const getUserByEmail = (e) => db.prepare('SELECT * FROM users WHERE email=?').get(String(e).toLowerCase());
 const getProfile = (uid) => db.prepare('SELECT * FROM profiles WHERE user_id=?').get(uid) || {};
 const listStaff = () => db.prepare(`SELECT u.id,u.email,u.role,p.* FROM users u
-  LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role IN ('staff','manager') ORDER BY p.full_name, u.email`).all();
+  LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role != 'admin' ORDER BY p.full_name, u.email`).all();
 const listDocs = (uid) => db.prepare('SELECT * FROM documents WHERE user_id=? ORDER BY uploaded_at DESC').all(uid);
 const listEmployment = (uid) => db.prepare('SELECT * FROM employment_history WHERE user_id=? ORDER BY from_date DESC, id DESC').all(uid);
 const listReferences = (uid) => db.prepare('SELECT * FROM reference_checks WHERE user_id=? ORDER BY created_at DESC').all(uid);
@@ -127,7 +129,7 @@ app.post('/register', (req, res) => {
   if ((req.body.password || '').length < 8) return res.status(400).send(registerPage({ error: 'Choose a password of at least 8 characters.', code, email }));
   const now = Date.now();
   const info = db.prepare('INSERT INTO users (email,password,role,created_at,name) VALUES (?,?,?,?,?)')
-    .run(email, hashPassword(req.body.password), 'staff', now, inv.full_name || '');
+    .run(email, hashPassword(req.body.password), inv.role || 'carer', now, inv.full_name || '');
   const uid = Number(info.lastInsertRowid);
   db.prepare('INSERT INTO profiles (user_id, full_name, job_title, status, updated_at) VALUES (?,?,?,?,?)')
     .run(uid, inv.full_name || '', inv.job_title || '', 'active', now);
@@ -138,7 +140,7 @@ app.post('/register', (req, res) => {
 
 // ---- dashboard -------------------------------------------------------------
 app.get('/', requireAuth, (req, res) => {
-  if (req.user.role === 'staff') return res.redirect(`/staff/${req.user.id}`);
+  if (isFrontline(req.user.role)) return res.redirect(`/staff/${req.user.id}`);
   const staff = listStaff();
   const rows = staff.map((s) => ({ ...s, c: computeCompliance(s) }));
   const tot = { red: 0, amber: 0, green: 0, expired: 0, critical: 0 };
@@ -173,7 +175,7 @@ app.get('/', requireAuth, (req, res) => {
 });
 
 // ---- staff list ------------------------------------------------------------
-app.get('/staff', requireRole('admin', 'manager'), (req, res) => {
+app.get('/staff', requireOversight, (req, res) => {
   const q = String(req.query.q || '').toLowerCase();
   const filter = String(req.query.filter || 'all');
   let all = listStaff().map((s) => ({ ...s, c: computeCompliance(s), ndocs: db.prepare('SELECT COUNT(*) n FROM documents WHERE user_id=?').get(s.id).n }));
@@ -231,7 +233,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
   const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   const p = getProfile(u.id); const c = computeCompliance(p); const docs = listDocs(u.id);
   const emp = listEmployment(u.id); const refs = listReferences(u.id);
-  const canEdit = req.user.role === 'admin' || req.user.role === 'manager' || req.user.id === u.id;
+  const canEdit = canEditStaff(req.user, u.id);
   const sectNav = PROFILE_SECTIONS.map((s) => `<a href="#${s.id}">${esc(s.title)}</a>`).join('');
   const sections = PROFILE_SECTIONS.map((s) => `
     <div class="card" id="${s.id}" style="margin-bottom:1rem"><div class="card-h">${esc(s.title)}</div>
@@ -276,7 +278,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
       <div style="margin-top:.55rem;display:flex;gap:.4rem;flex-wrap:wrap">${ragBadge(c.rag)}${p.is_sponsored ? '<span class="badge">Sponsored worker</span>' : ''}${p.status && p.status !== 'active' ? `<span class="badge">${esc(p.status)}</span>` : ''}</div>
     </div>
     <div class="hero-actions">
-      ${(req.user.role === 'admin' || req.user.role === 'manager') ? `<a class="btn ghost" href="/staff/${u.id}/export.zip" title="ZIP of all documents + PDF summary for CQC/HMRC">${icon('pack')} Document pack</a><a class="btn ghost" href="/staff/${u.id}/summary.pdf">Summary PDF</a>` : ''}
+      ${isOversight(req.user.role) ? `<a class="btn ghost" href="/staff/${u.id}/export.zip" title="ZIP of all documents + PDF summary for CQC/HMRC">${icon('pack')} Document pack</a><a class="btn ghost" href="/staff/${u.id}/summary.pdf">Summary PDF</a>` : ''}
       ${canEdit ? `<a class="btn ghost" href="/staff/${u.id}/edit">Edit record</a>` : ''}
     </div>
   </div>
@@ -322,10 +324,10 @@ app.get('/staff/:id', requireAuth, (req, res) => {
 
 // ---- profile edit ----------------------------------------------------------
 app.get('/staff/:id/edit', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
   const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   const p = getProfile(u.id);
-  const isManager = req.user.role === 'admin' || req.user.role === 'manager';
+  const isManager = isManagerLevel(req.user.role);
   const sections = PROFILE_SECTIONS.map((s) => `
     <div class="card" id="${s.id}" style="margin-bottom:1rem"><div class="card-h">${esc(s.title)}</div>
       <div class="card-b"><div class="form-grid">${s.fields.map((f) =>
@@ -367,11 +369,11 @@ app.get('/staff/:id/edit', requireAuth, (req, res) => {
 });
 
 app.post('/staff/:id', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
   const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   // Managers/admins may edit the whole record; a staff member editing their own
   // record may only change contact details — never their own compliance status.
-  const isManager = req.user.role === 'admin' || req.user.role === 'manager';
+  const isManager = isManagerLevel(req.user.role);
   const editableKeys = isManager ? PROFILE_KEYS : PROFILE_KEYS.filter((k) => SELF_EDITABLE_KEYS.has(k));
   const checkboxKeys = new Set(PROFILE_SECTIONS.flatMap((s) => s.fields.filter((f) => f.type === 'checkbox').map((f) => f.key)));
   const sets = [], vals = [];
@@ -404,7 +406,7 @@ const upload = multer({
 });
 
 app.post('/staff/:id/documents', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
   upload.single('file')(req, res, (err) => {
     if (err) return res.status(400).send('Upload failed: ' + err.message);
     if (!req.file) return res.status(400).send('No file (allowed: PDF, image, Word).');
@@ -429,7 +431,7 @@ app.get('/documents/:id', requireAuth, (req, res) => {
 });
 app.post('/documents/:id/delete', requireAuth, (req, res) => {
   const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
-  if (!d || !canAccessStaff(req.user, d.user_id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!d || !canEditStaff(req.user, d.user_id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
   try { fs.unlinkSync(path.join(UPLOADS_DIR, path.basename(d.file_path))); } catch {}
   db.prepare('DELETE FROM documents WHERE id=?').run(d.id);
   audit(req.user, 'delete_document', d.user_id);
@@ -458,34 +460,34 @@ app.get('/staff/:id/export.zip', requireAuth, async (req, res) => {
 
 // ---- employment history & references ---------------------------------------
 app.post('/staff/:id/employment', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
   db.prepare('INSERT INTO employment_history (user_id,employer,job_title,from_date,to_date,is_care_role,reason_for_leaving,gap_explanation,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
     .run(req.params.id, req.body.employer || '', req.body.job_title || '', req.body.from_date || '', req.body.to_date || '', req.body.is_care_role ? 1 : 0, req.body.reason_for_leaving || '', req.body.gap_explanation || '', Date.now());
   audit(req.user, 'add_employment', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
 app.post('/staff/:id/employment/:eid/delete', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
   db.prepare('DELETE FROM employment_history WHERE id=? AND user_id=?').run(req.params.eid, req.params.id);
   audit(req.user, 'delete_employment', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
 app.post('/staff/:id/references', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
   db.prepare('INSERT INTO reference_checks (user_id,referee_name,referee_org,relationship,is_most_recent_employer,status,created_at) VALUES (?,?,?,?,?,?,?)')
     .run(req.params.id, req.body.referee_name || '', req.body.referee_org || '', req.body.relationship || '', req.body.is_most_recent_employer ? 1 : 0, req.body.status || 'requested', Date.now());
   audit(req.user, 'add_reference', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
 app.post('/staff/:id/references/:rid/delete', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
   db.prepare('DELETE FROM reference_checks WHERE id=? AND user_id=?').run(req.params.rid, req.params.id);
   audit(req.user, 'delete_reference', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
 
 // ---- alerts ----------------------------------------------------------------
-app.get('/alerts', requireRole('admin', 'manager'), (req, res) => {
+app.get('/alerts', requireOversight, (req, res) => {
   const rows = [];
   for (const s of listStaff()) for (const a of computeCompliance(s).alerts) rows.push({ s, a });
   rows.sort((x, y) => x.a.days - y.a.days);
@@ -508,7 +510,7 @@ app.get('/alerts', requireRole('admin', 'manager'), (req, res) => {
   res.send(layout({ user: req.user, title: 'Alerts', active: '/alerts', body }));
 });
 
-app.post('/admin/send-reminders', requireRole('admin', 'manager'), async (req, res) => {
+app.post('/admin/send-reminders', requireManager, async (req, res) => {
   let r;
   try { r = await sendDigest(); } catch (e) { r = { sent: false, reason: e.message }; }
   audit(req.user, 'send_reminders', null, r.sent ? `to ${r.to.length}` : r.reason);
@@ -516,7 +518,7 @@ app.post('/admin/send-reminders', requireRole('admin', 'manager'), async (req, r
 });
 
 // ---- invites ---------------------------------------------------------------
-app.get('/admin/invites', requireRole('admin', 'manager'), (req, res) => {
+app.get('/admin/invites', requireManager, (req, res) => {
   const invites = db.prepare('SELECT * FROM invite_codes ORDER BY created_at DESC').all();
   const origin = `${req.protocol}://${req.get('host')}`;
   const body = `
@@ -526,28 +528,33 @@ app.get('/admin/invites', requireRole('admin', 'manager'), (req, res) => {
       <div class="field"><label>Email</label><input name="email" type="email" required></div>
       <div class="field"><label>Full name</label><input name="full_name"></div>
       <div class="field"><label>Job title</label><input name="job_title"></div>
+      <div class="field"><label>Role</label><select name="role">${ROLES.map((r) => `<option value="${r.value}"${r.value === 'carer' ? ' selected' : ''}>${esc(r.label)}</option>`).join('')}</select></div>
     </div><button class="btn">Create invite</button></div></form></div>
   <div class="card"><div class="card-b" style="padding:0">
-  <table class="tbl"><thead><tr><th>Code</th><th>Email</th><th>Expires</th><th>Status</th><th>Link</th></tr></thead><tbody>
+  <table class="tbl"><thead><tr><th>Code</th><th>Email</th><th>Role</th><th>Expires</th><th>Status</th><th>Link</th></tr></thead><tbody>
   ${invites.map((i) => `<tr><td><code>${esc(i.code)}</code></td><td>${esc(i.email)}</td>
+    <td>${esc(roleLabel(i.role || 'carer'))}</td>
     <td>${i.expires_at ? fmtDate(new Date(i.expires_at).toISOString()) : '—'}</td>
     <td>${i.used_at ? '<span class="badge grey">Used</span>' : (i.expires_at && i.expires_at < Date.now() ? '<span class="badge red">Expired</span>' : '<span class="badge green">Active</span>')}</td>
-    <td class="small">${esc(origin)}/register</td></tr>`).join('') || '<tr><td colspan="5" class="muted" style="padding:1rem">No invites yet.</td></tr>'}
+    <td class="small">${esc(origin)}/register</td></tr>`).join('') || '<tr><td colspan="6" class="muted" style="padding:1rem">No invites yet.</td></tr>'}
   </tbody></table></div></div>`;
   res.send(layout({ user: req.user, title: 'Invitations', active: '/admin/invites', body }));
 });
-app.post('/admin/invites', requireRole('admin', 'manager'), (req, res) => {
+app.post('/admin/invites', requireManager, (req, res) => {
   const code = `${rand4()}-${rand4()}-${rand4()}`;
   const now = Date.now();
-  db.prepare('INSERT INTO invite_codes (code,email,full_name,job_title,created_by_email,created_at,expires_at) VALUES (?,?,?,?,?,?,?)')
-    .run(code, String(req.body.email || '').toLowerCase(), req.body.full_name || '', req.body.job_title || '', req.user.email, now, now + 14 * 86400000);
-  audit(req.user, 'create_invite', null, req.body.email || '');
+  // Validate the requested role; only an admin may grant manager/admin.
+  let role = ROLES.some((r) => r.value === req.body.role) ? req.body.role : 'carer';
+  if (req.user.role !== 'admin' && (role === 'manager' || role === 'admin')) role = 'coordinator';
+  db.prepare('INSERT INTO invite_codes (code,email,full_name,job_title,role,created_by_email,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?)')
+    .run(code, String(req.body.email || '').toLowerCase(), req.body.full_name || '', req.body.job_title || '', role, req.user.email, now, now + 14 * 86400000);
+  audit(req.user, 'create_invite', null, `${req.body.email || ''} as ${role}`);
   res.redirect('/admin/invites');
 });
 const rand4 = () => randomBytes(3).toString('hex').toUpperCase().slice(0, 4);
 
 // ---- audit -----------------------------------------------------------------
-app.get('/admin/audit', requireRole('admin', 'manager'), (req, res) => {
+app.get('/admin/audit', requireManager, (req, res) => {
   const rows = db.prepare('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 200').all();
   const body = `
   <div class="page-head"><div><h1>Audit log</h1><p class="muted">Most recent 200 actions</p></div></div>
@@ -570,7 +577,7 @@ const logoUpload = multer({
   fileFilter: (_q, file, cb) => cb(null, /\.(png|jpe?g|svg|webp|gif)$/i.test(file.originalname)),
 });
 
-app.get('/admin/settings', requireRole('admin'), (req, res) => {
+app.get('/admin/settings', requireAdmin, (req, res) => {
   const b = getBranding();
   const body = `
   <div class="page-head"><div><h1>Settings</h1><p class="muted">Branding & organisation</p></div></div>
@@ -596,12 +603,12 @@ app.get('/admin/settings', requireRole('admin'), (req, res) => {
   </div>`;
   res.send(layout({ user: req.user, title: 'Settings', active: '/admin/settings', body }));
 });
-app.post('/admin/settings', requireRole('admin'), (req, res) => {
+app.post('/admin/settings', requireAdmin, (req, res) => {
   brandMeta.set('org_name', (req.body.org_name || 'Sky Home Living').trim() || 'Sky Home Living');
   audit(req.user, 'update_settings');
   res.redirect('/admin/settings?saved=1');
 });
-app.post('/admin/branding/logo', requireRole('admin'), (req, res) => {
+app.post('/admin/branding/logo', requireAdmin, (req, res) => {
   logoUpload.single('logo')(req, res, (err) => {
     if (err) return res.redirect('/admin/settings?err=' + encodeURIComponent('Upload failed: ' + err.message));
     if (!req.file) return res.redirect('/admin/settings?err=' + encodeURIComponent('Choose a PNG, JPG, SVG or WebP image.'));
@@ -612,7 +619,7 @@ app.post('/admin/branding/logo', requireRole('admin'), (req, res) => {
     res.redirect('/admin/settings?saved=1');
   });
 });
-app.post('/admin/branding/logo/delete', requireRole('admin'), (req, res) => {
+app.post('/admin/branding/logo/delete', requireAdmin, (req, res) => {
   const f = brandMeta.get('logo_file');
   if (f) { try { fs.unlinkSync(path.join(BRAND_DIR, f)); } catch {} }
   brandMeta.del('logo_file');

@@ -1,5 +1,7 @@
 // views.js — HTML shell, reusable components, and the login page.
 import { getBranding } from './branding.js';
+import { roleLabel, isFrontline, isOversight, isManagerLevel, isAdmin } from './compliance.js';
+export { roleLabel };
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -54,16 +56,18 @@ export function fileKind(p) {
 export const fileExt = (p) => { const m = String(p || '').match(/\.([a-z0-9]{1,5})$/i); return m ? m[1].toUpperCase() : 'FILE'; };
 
 function navFor(user) {
+  // Frontline (carer/support worker) only ever see their own record.
+  if (isFrontline(user.role)) return [[`/staff/${user.id}`, 'badge', 'My record']];
   const items = [['/', 'dashboard', 'Dashboard']];
-  if (user.role === 'admin' || user.role === 'manager') {
+  if (isOversight(user.role)) {
     items.push(['/staff', 'staff', 'Staff records']);
     items.push(['/alerts', 'alert', 'Compliance alerts']);
+  }
+  if (isManagerLevel(user.role)) {
     items.push(['/admin/invites', 'invite', 'Invitations']);
     items.push(['/admin/audit', 'audit', 'Audit log']);
-    if (user.role === 'admin') items.push(['/admin/settings', 'cog', 'Settings']);
-  } else {
-    items.push([`/staff/${user.id}`, 'badge', 'My record']);
   }
+  if (isAdmin(user.role)) items.push(['/admin/settings', 'cog', 'Settings']);
   return items;
 }
 
@@ -95,8 +99,6 @@ export function layout({ user, title = 'Compliance Records', active = '/', body 
   </div>
 </div>${scripts}</body></html>`;
 }
-
-export const roleLabel = (r) => ({ admin: 'Administrator', manager: 'Manager', staff: 'Staff' }[r] || r);
 
 // Branded error page. Inside the app shell when signed in; standalone otherwise.
 export function errorPage({ user = null, code = 404, title = 'Not found', message = '' } = {}) {

@@ -24,7 +24,7 @@ export function recipients() {
 }
 
 export function buildDigest(withinDays = 60) {
-  const staff = db.prepare(`SELECT u.id,u.email,p.* FROM users u LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role IN ('staff','manager')`).all();
+  const staff = db.prepare(`SELECT u.id,u.email,p.* FROM users u LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role != 'admin'`).all();
   const items = [];
   for (const s of staff) for (const a of computeCompliance(s).alerts) if (a.days <= withinDays) items.push({ name: s.full_name || s.email, id: s.id, ...a });
   items.sort((x, y) => x.days - y.days);

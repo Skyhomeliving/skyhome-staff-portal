@@ -27,12 +27,12 @@ export function seedDemo() {
   const iso = (off) => { const d = new Date(); d.setDate(d.getDate() + off); return d.toISOString().slice(0, 10); };
   createUser({ email: 'manager@demo.local', password: 'demo', role: 'manager', name: 'Pat Morgan' });
   const samples = [
-    { name: 'Aisha Khan', job: 'Care Worker', rtw: iso(400), dbs: iso(-20), visa: '', fa: iso(18), mand: iso(220), drives: 1, dl: iso(900) },
-    { name: 'Bilal Shafiq', job: 'Senior Carer', rtw: iso(110), dbs: iso(300), visa: iso(40), fa: iso(-6), mand: iso(25), drives: 0, dl: '' },
-    { name: 'Grace Okafor', job: 'Support Worker', rtw: iso(900), dbs: iso(540), visa: '', fa: iso(360), mand: iso(360), drives: 1, dl: iso(50) },
+    { name: 'Aisha Khan', job: 'Care Worker', role: 'carer', rtw: iso(400), dbs: iso(-20), visa: '', fa: iso(18), mand: iso(220), drives: 1, dl: iso(900) },
+    { name: 'Bilal Shafiq', job: 'Senior Carer', role: 'carer', rtw: iso(110), dbs: iso(300), visa: iso(40), fa: iso(-6), mand: iso(25), drives: 0, dl: '' },
+    { name: 'Grace Okafor', job: 'Support Worker', role: 'support_worker', rtw: iso(900), dbs: iso(540), visa: '', fa: iso(360), mand: iso(360), drives: 1, dl: iso(50) },
   ];
   for (const s of samples) {
-    const id = createUser({ email: `${s.name.split(' ')[0].toLowerCase()}@demo.local`, password: 'demo', role: 'staff', name: s.name });
+    const id = createUser({ email: `${s.name.split(' ')[0].toLowerCase()}@demo.local`, password: 'demo', role: s.role || 'carer', name: s.name });
     db.prepare(`UPDATE profiles SET full_name=?, job_title=?, dbs_status='Clear', right_to_work_status='Confirmed',
       right_to_work_expiry=?, dbs_expiry=?, visa_expiry=?, is_sponsored=?, first_aid_expiry=?, mandatory_training_expiry=?,
       drives_for_work=?, driving_licence_expiry=? WHERE user_id=?`)

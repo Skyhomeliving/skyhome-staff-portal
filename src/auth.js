@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { randomBytes } from 'node:crypto';
 import { db } from './db.js';
 import { errorPage } from './views.js';
+import { isOversight, isManagerLevel, isAdmin } from './compliance.js';
 
 export const SESSION_COOKIE = 'shl_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14; // 14 days
@@ -118,18 +119,33 @@ export function requireAuth(req, res, next) {
   next();
 }
 
+const denyArea = (req, res) => res.status(403).send(errorPage({
+  user: req.user, code: 403, title: 'Not allowed',
+  message: 'Your role does not have access to this area. If you think this is wrong, contact your manager.',
+}));
+
 export const requireRole = (...roles) => (req, res, next) => {
   if (!req.user) return res.redirect('/login');
-  if (!roles.includes(req.user.role)) {
-    return res.status(403).send(errorPage({
-      user: req.user, code: 403, title: 'Not allowed',
-      message: 'Your role does not have access to this area. If you think this is wrong, contact your manager.',
-    }));
-  }
+  if (!roles.includes(req.user.role)) return denyArea(req, res);
   next();
 };
 
-// A staff member may view/edit only their own record; managers/admins, anyone.
-export function canAccessStaff(user, targetUserId) {
-  return user.role === 'admin' || user.role === 'manager' || user.id === Number(targetUserId);
+// Tier-based guards (preferred over hard-coded role lists).
+export const requireOversight = (req, res, next) =>
+  !req.user ? res.redirect('/login') : isOversight(req.user.role) ? next() : denyArea(req, res);
+export const requireManager = (req, res, next) =>
+  !req.user ? res.redirect('/login') : isManagerLevel(req.user.role) ? next() : denyArea(req, res);
+export const requireAdmin = (req, res, next) =>
+  !req.user ? res.redirect('/login') : isAdmin(req.user.role) ? next() : denyArea(req, res);
+
+// Viewing a record: oversight (coordinator) and management, plus the person
+// themselves. Editing: management only, plus the person themselves — and those
+// self-edits are further limited to contact fields by SELF_EDITABLE_KEYS.
+export function canViewStaff(user, targetUserId) {
+  return isOversight(user.role) || user.id === Number(targetUserId);
 }
+export function canEditStaff(user, targetUserId) {
+  return isManagerLevel(user.role) || user.id === Number(targetUserId);
+}
+// Legacy alias — view semantics.
+export const canAccessStaff = canViewStaff;
