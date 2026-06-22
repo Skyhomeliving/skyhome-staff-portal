@@ -7,11 +7,18 @@
 //   - branding/   custom logo etc., if present
 //
 // Only reads live data, so it is safe to run while the server is online.
-// Usage: node --experimental-sqlite src/backup.js
-//        DATA_DIR=/path node --experimental-sqlite src/backup.js   (custom volume)
+//
+// CLI:    node --experimental-sqlite src/backup.js
+// In-app: startBackupScheduler() runs it nightly (wired up in server.js).
+//
+// Env:
+//   DATA_DIR      data volume (default ./data)
+//   BACKUP_KEEP   how many backups to retain (default 14; 0 = keep all)
+//   BACKUP_HOUR   hour-of-day (0-23) for the nightly job (default 2)
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import archiver from 'archiver';
 
@@ -26,23 +33,34 @@ const stamp = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate(
   + `-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 // SQLite accepts forward slashes on Windows; double up any single quotes.
 const sqlPath = (p) => p.replace(/\\/g, '/').replace(/'/g, "''");
+// Backups, oldest-first (the timestamp name sorts chronologically).
+const listBackups = () => (fs.existsSync(BACKUP_DIR) ? fs.readdirSync(BACKUP_DIR) : [])
+  .filter((f) => /^backup-\d{8}-\d{6}\.zip$/.test(f)).sort();
 
-async function main() {
-  if (!fs.existsSync(DB_PATH)) {
-    console.error(`No database at ${DB_PATH} — nothing to back up.`);
-    process.exit(1);
-  }
+// Keep the newest `keep` backups, delete older ones. keep < 1 keeps all.
+export function pruneBackups(keep = Number(process.env.BACKUP_KEEP ?? 14)) {
+  if (!keep || keep < 1) return [];
+  const all = listBackups();
+  const stale = all.slice(0, Math.max(0, all.length - keep));
+  for (const f of stale) { try { fs.unlinkSync(path.join(BACKUP_DIR, f)); } catch {} }
+  return stale;
+}
+
+// Has a backup already been written today? (the filesystem is the source of truth)
+export function backedUpToday(d = new Date()) {
+  const prefix = `backup-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-`;
+  return listBackups().some((f) => f.startsWith(prefix));
+}
+
+export async function runBackup({ prune = false } = {}) {
+  if (!fs.existsSync(DB_PATH)) throw new Error(`No database at ${DB_PATH}`);
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
   const ts = stamp(new Date());
 
   // 1) Consistent snapshot of the database (handles WAL correctly).
   const snap = path.join(BACKUP_DIR, `.snapshot-${ts}.db`);
   const db = new DatabaseSync(DB_PATH);
-  try {
-    db.exec(`VACUUM INTO '${sqlPath(snap)}'`);
-  } finally {
-    db.close();
-  }
+  try { db.exec(`VACUUM INTO '${sqlPath(snap)}'`); } finally { db.close(); }
 
   // 2) Bundle snapshot + documents + branding into one timestamped zip.
   const outPath = path.join(BACKUP_DIR, `backup-${ts}.zip`);
@@ -61,9 +79,28 @@ async function main() {
   await done;
 
   fs.unlinkSync(snap); // the snapshot now lives inside the zip
-
-  const mb = (fs.statSync(outPath).size / 1024 / 1024).toFixed(2);
-  console.log(`Backup written: ${outPath} (${mb} MB)`);
+  if (prune) pruneBackups();
+  return outPath;
 }
 
-main().catch((e) => { console.error('Backup failed:', e); process.exit(1); });
+// Daily scheduler: hourly tick, runs once per day after BACKUP_HOUR (default 02:00).
+export function startBackupScheduler() {
+  const HOUR = Number(process.env.BACKUP_HOUR || 2);
+  const tick = async () => {
+    try {
+      if (new Date().getHours() < HOUR) return;
+      if (backedUpToday()) return;
+      const out = await runBackup({ prune: true });
+      console.log(`[backup] nightly backup written: ${path.basename(out)}`);
+    } catch (e) { console.error('[backup] error:', e.message); }
+  };
+  setInterval(tick, 60 * 60 * 1000);
+  setTimeout(tick, 30000);
+}
+
+// CLI entry point (only when run directly, not when imported by the server).
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runBackup({ prune: true })
+    .then((p) => console.log(`Backup written: ${p} (${(fs.statSync(p).size / 1024 / 1024).toFixed(2)} MB)`))
+    .catch((e) => { console.error('Backup failed:', e.message); process.exit(1); });
+}

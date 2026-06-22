@@ -21,6 +21,7 @@ import { startScheduler, sendDigest, mailConfigured, recipients, lastSentAt } fr
 import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js';
 import { layout, loginPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, fileKind, fileExt } from './views.js';
 import { securityMiddleware } from './security.js';
+import { startBackupScheduler } from './backup.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -45,6 +46,7 @@ const listReferences = (uid) => db.prepare('SELECT * FROM reference_checks WHERE
 seedAdmin();
 if (process.env.SEED_DEMO === '1') seedDemo();
 startScheduler();
+startBackupScheduler();
 
 app.use(attachUser);
 app.get('/healthz', (_req, res) => res.type('text').send('ok'));
