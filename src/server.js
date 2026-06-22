@@ -20,10 +20,12 @@ import { streamZip, pdfBuffer, writeSummary } from './export.js';
 import { startScheduler, sendDigest, mailConfigured, recipients, lastSentAt } from './reminders.js';
 import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js';
 import { layout, loginPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, fileKind, fileExt } from './views.js';
+import { securityMiddleware } from './security.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
 const app = express();
+securityMiddleware(app);
 app.disable('x-powered-by');
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());

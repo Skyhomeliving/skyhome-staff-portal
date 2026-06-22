@@ -6,9 +6,13 @@ export const securityMiddleware = (app) => {
   app.use(helmet({
     contentSecurityPolicy: false
   }));
-  app.use('/login', rateLimit({
+  // Limit only the POST (the actual sign-in attempt) — viewing or
+  // refreshing the GET /login page must not count toward the limit.
+  app.post('/login', rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
     message: 'Too many login attempts. Please wait 15 minutes.'
   }));
 };
