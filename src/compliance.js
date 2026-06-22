@@ -119,6 +119,15 @@ export const PROFILE_SECTIONS = [
 // All editable profile keys (used for safe updates).
 export const PROFILE_KEYS = PROFILE_SECTIONS.flatMap((s) => s.fields.map((f) => f.key));
 
+// Fields a non-manager may edit on their OWN record. Everything else — DBS,
+// Right to Work, training, professional registration, status, references — is
+// manager-maintained, so staff cannot self-certify their own compliance.
+// (Staff can still upload documents; those land 'pending' for manager approval.)
+export const SELF_EDITABLE_KEYS = new Set([
+  'preferred_name', 'phone', 'home_address',
+  'emergency_contact_name', 'emergency_contact_phone',
+]);
+
 // Every date field marked expiry:true becomes a tracked renewal.
 export const EXPIRY_TRACKERS = PROFILE_SECTIONS.flatMap((s) =>
   s.fields.filter((f) => f.expiry).map((f) => ({ key: f.key, label: f.label, area: s.title }))

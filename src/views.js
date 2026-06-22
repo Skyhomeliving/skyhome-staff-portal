@@ -98,6 +98,23 @@ export function layout({ user, title = 'Compliance Records', active = '/', body 
 
 export const roleLabel = (r) => ({ admin: 'Administrator', manager: 'Manager', staff: 'Staff' }[r] || r);
 
+// Branded error page. Inside the app shell when signed in; standalone otherwise.
+export function errorPage({ user = null, code = 404, title = 'Not found', message = '' } = {}) {
+  const body = `<div class="errwrap">
+    <div class="errcode">${esc(String(code))}</div>
+    <h1>${esc(title)}</h1>
+    <p class="muted">${esc(message)}</p>
+    <a class="btn" href="/">Back to dashboard</a>
+  </div>`;
+  if (user) return layout({ user, title, active: '', body });
+  const brand = getBranding();
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<link rel="icon" href="/favicon.png"><title>${esc(title)} · ${esc(brand.orgName)}</title>
+<link rel="stylesheet" href="/styles.css"></head>
+<body><div class="auth-wrap"><div class="auth-card">${body}</div></div></body></html>`;
+}
+
 export function loginPage({ error = '', message = '' } = {}) {
   const brand = getBranding();
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">

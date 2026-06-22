@@ -2,6 +2,7 @@
 import bcrypt from 'bcryptjs';
 import { randomBytes } from 'node:crypto';
 import { db } from './db.js';
+import { errorPage } from './views.js';
 
 export const SESSION_COOKIE = 'shl_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14; // 14 days
@@ -63,7 +64,12 @@ export function requireAuth(req, res, next) {
 
 export const requireRole = (...roles) => (req, res, next) => {
   if (!req.user) return res.redirect('/login');
-  if (!roles.includes(req.user.role)) return res.status(403).send('Forbidden');
+  if (!roles.includes(req.user.role)) {
+    return res.status(403).send(errorPage({
+      user: req.user, code: 403, title: 'Not allowed',
+      message: 'Your role does not have access to this area. If you think this is wrong, contact your manager.',
+    }));
+  }
   next();
 };
 

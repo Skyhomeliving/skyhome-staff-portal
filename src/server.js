@@ -13,13 +13,13 @@ import {
   attachUser, requireAuth, requireRole, canAccessStaff, audit, SESSION_COOKIE,
 } from './auth.js';
 import {
-  PROFILE_SECTIONS, PROFILE_KEYS, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance, daysUntil,
+  PROFILE_SECTIONS, PROFILE_KEYS, SELF_EDITABLE_KEYS, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance, daysUntil,
 } from './compliance.js';
 import { seedAdmin, seedDemo } from './seed.js';
 import { streamZip, pdfBuffer, writeSummary } from './export.js';
 import { startScheduler, sendDigest, mailConfigured, recipients, lastSentAt } from './reminders.js';
 import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js';
-import { layout, loginPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, fileKind, fileExt } from './views.js';
+import { layout, loginPage, errorPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, fileKind, fileExt } from './views.js';
 import { securityMiddleware } from './security.js';
 import { startBackupScheduler } from './backup.js';
 
@@ -176,8 +176,8 @@ function renderEditField(f, val) {
 }
 
 app.get('/staff/:id', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
-  const u = getUser(req.params.id); if (!u) return res.status(404).send('Not found');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   const p = getProfile(u.id); const c = computeCompliance(p); const docs = listDocs(u.id);
   const emp = listEmployment(u.id); const refs = listReferences(u.id);
   const canEdit = req.user.role === 'admin' || req.user.role === 'manager' || req.user.id === u.id;
@@ -271,16 +271,20 @@ app.get('/staff/:id', requireAuth, (req, res) => {
 
 // ---- profile edit ----------------------------------------------------------
 app.get('/staff/:id/edit', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
-  const u = getUser(req.params.id); if (!u) return res.status(404).send('Not found');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   const p = getProfile(u.id);
+  const isManager = req.user.role === 'admin' || req.user.role === 'manager';
   const sections = PROFILE_SECTIONS.map((s) => `
     <div class="card" id="${s.id}" style="margin-bottom:1rem"><div class="card-h">${esc(s.title)}</div>
-      <div class="card-b"><div class="form-grid">${s.fields.map((f) => renderEditField(f, p[f.key])).join('')}</div></div></div>`).join('');
+      <div class="card-b"><div class="form-grid">${s.fields.map((f) =>
+        (isManager || SELF_EDITABLE_KEYS.has(f.key)) ? renderEditField(f, p[f.key]) : renderViewField(f, p[f.key])
+      ).join('')}</div></div></div>`).join('');
   const cats = DOCUMENT_CATEGORIES.map((c) => `<option value="${c.value}">${esc(c.label)}</option>`).join('');
   const body = `
   <div class="page-head"><div><h1>Edit record</h1><p class="muted">${esc(p.full_name || u.email)}</p></div>
     <a class="btn ghost" href="/staff/${u.id}">Cancel</a></div>
+  ${!isManager ? `<div class="flash info">Your compliance details (DBS, Right to Work, training, references) are kept up to date by your manager and shown here read-only. You can update your contact &amp; emergency details, and upload documents below for your manager to approve.</div>` : ''}
   <form method="post" action="/staff/${u.id}">
     ${sections}
     <div style="position:sticky;bottom:0;background:linear-gradient(#fff0,#fff 40%);padding:1rem 0">
@@ -312,19 +316,25 @@ app.get('/staff/:id/edit', requireAuth, (req, res) => {
 });
 
 app.post('/staff/:id', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
-  const u = getUser(req.params.id); if (!u) return res.status(404).send('Not found');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
+  // Managers/admins may edit the whole record; a staff member editing their own
+  // record may only change contact details — never their own compliance status.
+  const isManager = req.user.role === 'admin' || req.user.role === 'manager';
+  const editableKeys = isManager ? PROFILE_KEYS : PROFILE_KEYS.filter((k) => SELF_EDITABLE_KEYS.has(k));
   const checkboxKeys = new Set(PROFILE_SECTIONS.flatMap((s) => s.fields.filter((f) => f.type === 'checkbox').map((f) => f.key)));
   const sets = [], vals = [];
-  for (const k of PROFILE_KEYS) {
+  for (const k of editableKeys) {
     let v;
     if (checkboxKeys.has(k)) v = req.body[k] ? 1 : 0;
     else v = (req.body[k] ?? '').toString();
     sets.push(`${k}=?`); vals.push(v);
   }
-  vals.push(Date.now(), u.id);
-  db.prepare(`UPDATE profiles SET ${sets.join(',')}, updated_at=? WHERE user_id=?`).run(...vals);
-  audit(req.user, 'update_profile', u.id);
+  if (sets.length) {
+    vals.push(Date.now(), u.id);
+    db.prepare(`UPDATE profiles SET ${sets.join(',')}, updated_at=? WHERE user_id=?`).run(...vals);
+  }
+  audit(req.user, isManager ? 'update_profile' : 'update_own_contact', u.id);
   res.redirect(`/staff/${u.id}`);
 });
 
@@ -343,7 +353,7 @@ const upload = multer({
 });
 
 app.post('/staff/:id/documents', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   upload.single('file')(req, res, (err) => {
     if (err) return res.status(400).send('Upload failed: ' + err.message);
     if (!req.file) return res.status(400).send('No file (allowed: PDF, image, Word).');
@@ -356,9 +366,9 @@ app.post('/staff/:id/documents', requireAuth, (req, res) => {
 
 app.get('/documents/:id', requireAuth, (req, res) => {
   const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
-  if (!d || !canAccessStaff(req.user, d.user_id)) return res.status(403).send('Forbidden');
+  if (!d || !canAccessStaff(req.user, d.user_id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   const fp = path.join(UPLOADS_DIR, path.basename(d.file_path));
-  if (!fs.existsSync(fp)) return res.status(404).send('File missing');
+  if (!fs.existsSync(fp)) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'File missing', message: 'The stored file could not be found. It may have been removed.' }));
   if (req.query.dl) {
     const ext = path.extname(d.file_path) || '';
     const name = `${categoryLabel(d.category)}_${d.title || 'document'}`.replace(/[^a-z0-9]+/gi, '_').replace(/_+/g, '_') + ext;
@@ -368,7 +378,7 @@ app.get('/documents/:id', requireAuth, (req, res) => {
 });
 app.get('/documents/:id/delete', requireAuth, (req, res) => {
   const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
-  if (!d || !canAccessStaff(req.user, d.user_id)) return res.status(403).send('Forbidden');
+  if (!d || !canAccessStaff(req.user, d.user_id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   try { fs.unlinkSync(path.join(UPLOADS_DIR, path.basename(d.file_path))); } catch {}
   db.prepare('DELETE FROM documents WHERE id=?').run(d.id);
   audit(req.user, 'delete_document', d.user_id);
@@ -377,8 +387,8 @@ app.get('/documents/:id/delete', requireAuth, (req, res) => {
 
 // ---- exports: compliance pack (PDF summary + ZIP of documents) -------------
 app.get('/staff/:id/summary.pdf', requireAuth, async (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
-  const u = getUser(req.params.id); if (!u) return res.status(404).send('Not found');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   const p = getProfile(u.id); const docs = listDocs(u.id);
   audit(req.user, 'export_summary_pdf', u.id);
   const buf = await pdfBuffer((doc) => writeSummary(doc, { profile: p, user: u, docs, actor: req.user }));
@@ -388,8 +398,8 @@ app.get('/staff/:id/summary.pdf', requireAuth, async (req, res) => {
   res.end(buf);
 });
 app.get('/staff/:id/export.zip', requireAuth, async (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
-  const u = getUser(req.params.id); if (!u) return res.status(404).send('Not found');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   const p = getProfile(u.id); const docs = listDocs(u.id);
   audit(req.user, 'export_zip_pack', u.id);
   await streamZip(res, { profile: p, user: u, docs, actor: req.user, uploadsDir: UPLOADS_DIR });
@@ -397,27 +407,27 @@ app.get('/staff/:id/export.zip', requireAuth, async (req, res) => {
 
 // ---- employment history & references ---------------------------------------
 app.post('/staff/:id/employment', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   db.prepare('INSERT INTO employment_history (user_id,employer,job_title,from_date,to_date,is_care_role,reason_for_leaving,gap_explanation,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
     .run(req.params.id, req.body.employer || '', req.body.job_title || '', req.body.from_date || '', req.body.to_date || '', req.body.is_care_role ? 1 : 0, req.body.reason_for_leaving || '', req.body.gap_explanation || '', Date.now());
   audit(req.user, 'add_employment', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
 app.get('/staff/:id/employment/:eid/delete', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   db.prepare('DELETE FROM employment_history WHERE id=? AND user_id=?').run(req.params.eid, req.params.id);
   audit(req.user, 'delete_employment', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
 app.post('/staff/:id/references', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   db.prepare('INSERT INTO reference_checks (user_id,referee_name,referee_org,relationship,is_most_recent_employer,status,created_at) VALUES (?,?,?,?,?,?,?)')
     .run(req.params.id, req.body.referee_name || '', req.body.referee_org || '', req.body.relationship || '', req.body.is_most_recent_employer ? 1 : 0, req.body.status || 'requested', Date.now());
   audit(req.user, 'add_reference', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
 app.get('/staff/:id/references/:rid/delete', requireAuth, (req, res) => {
-  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send('Forbidden');
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   db.prepare('DELETE FROM reference_checks WHERE id=? AND user_id=?').run(req.params.rid, req.params.id);
   audit(req.user, 'delete_reference', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
