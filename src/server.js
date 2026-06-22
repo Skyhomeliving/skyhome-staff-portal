@@ -199,7 +199,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
       <div class="doc-actions">
         <a class="iconbtn" href="/documents/${d.id}" target="_blank" rel="noopener">${miniIcon('eye')} View</a>
         <a class="iconbtn" href="/documents/${d.id}?dl=1">${miniIcon('download')} Download</a>
-        ${canEdit ? `<a class="iconbtn danger" href="/documents/${d.id}/delete" onclick="return confirm('Delete this document?')" title="Delete">${miniIcon('trash')}</a>` : ''}
+        ${canEdit ? `<form method="post" action="/documents/${d.id}/delete" style="display:inline" onsubmit="return confirm('Delete this document?')"><button class="iconbtn danger" type="submit" title="Delete">${miniIcon('trash')}</button></form>` : ''}
       </div></div>`;
   }).join('');
   const lvlDate = (s) => { const dd = daysUntil(s); return dd == null ? 'grey' : dd < 0 ? 'red' : dd <= 30 ? 'amber' : 'green'; };
@@ -239,7 +239,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Employment history <span class="muted small">CQC Schedule 3</span></div>
     <div class="card-b" style="padding:0">
     <table class="tbl"><thead><tr><th>Employer</th><th>Role</th><th>From</th><th>To</th><th>Care role</th><th>Reason for leaving</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>
-    ${emp.map((e) => `<tr><td><b>${esc(e.employer)}</b>${e.gap_explanation ? `<div class="muted small">Gap: ${esc(e.gap_explanation)}</div>` : ''}</td><td>${esc(e.job_title)}</td><td>${fmtDate(e.from_date)}</td><td>${e.to_date ? fmtDate(e.to_date) : 'Present'}</td><td>${e.is_care_role ? '<span class="badge blue">Care</span>' : '—'}</td><td class="muted">${esc(e.reason_for_leaving)}</td>${canEdit ? `<td><a href="/staff/${u.id}/employment/${e.id}/delete" onclick="return confirm('Delete this entry?')">Delete</a></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canEdit ? 7 : 6}" class="muted" style="padding:1rem">No employment history recorded.</td></tr>`}
+    ${emp.map((e) => `<tr><td><b>${esc(e.employer)}</b>${e.gap_explanation ? `<div class="muted small">Gap: ${esc(e.gap_explanation)}</div>` : ''}</td><td>${esc(e.job_title)}</td><td>${fmtDate(e.from_date)}</td><td>${e.to_date ? fmtDate(e.to_date) : 'Present'}</td><td>${e.is_care_role ? '<span class="badge blue">Care</span>' : '—'}</td><td class="muted">${esc(e.reason_for_leaving)}</td>${canEdit ? `<td><form method="post" action="/staff/${u.id}/employment/${e.id}/delete" onsubmit="return confirm('Delete this entry?')"><button class="linkbtn danger" type="submit">Delete</button></form></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canEdit ? 7 : 6}" class="muted" style="padding:1rem">No employment history recorded.</td></tr>`}
     </tbody></table>
     ${canEdit ? `<form method="post" action="/staff/${u.id}/employment" class="card-b" style="border-top:1px solid var(--line-2)"><div class="form-grid">
       <div class="field"><label>Employer</label><input name="employer" required></div>
@@ -254,7 +254,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
   <div class="card" style="margin-bottom:1rem"><div class="card-h">References <span class="muted small">at least two, inc. most recent employer</span></div>
     <div class="card-b" style="padding:0">
     <table class="tbl"><thead><tr><th>Referee</th><th>Organisation</th><th>Relationship</th><th>Recent employer</th><th>Status</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>
-    ${refs.map((r) => `<tr><td><b>${esc(r.referee_name)}</b></td><td>${esc(r.referee_org)}</td><td>${esc(r.relationship)}</td><td>${r.is_most_recent_employer ? 'Yes' : '—'}</td><td>${levelBadge(r.status === 'received' ? 'ok' : r.status === 'rejected' ? 'expired' : 'warning', r.status)}</td>${canEdit ? `<td><a href="/staff/${u.id}/references/${r.id}/delete" onclick="return confirm('Delete this reference?')">Delete</a></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canEdit ? 6 : 5}" class="muted" style="padding:1rem">No references recorded.</td></tr>`}
+    ${refs.map((r) => `<tr><td><b>${esc(r.referee_name)}</b></td><td>${esc(r.referee_org)}</td><td>${esc(r.relationship)}</td><td>${r.is_most_recent_employer ? 'Yes' : '—'}</td><td>${levelBadge(r.status === 'received' ? 'ok' : r.status === 'rejected' ? 'expired' : 'warning', r.status)}</td>${canEdit ? `<td><form method="post" action="/staff/${u.id}/references/${r.id}/delete" onsubmit="return confirm('Delete this reference?')"><button class="linkbtn danger" type="submit">Delete</button></form></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canEdit ? 6 : 5}" class="muted" style="padding:1rem">No references recorded.</td></tr>`}
     </tbody></table>
     ${canEdit ? `<form method="post" action="/staff/${u.id}/references" class="card-b" style="border-top:1px solid var(--line-2)"><div class="form-grid">
       <div class="field"><label>Referee name</label><input name="referee_name" required></div>
@@ -376,7 +376,7 @@ app.get('/documents/:id', requireAuth, (req, res) => {
   }
   res.sendFile(fp);
 });
-app.get('/documents/:id/delete', requireAuth, (req, res) => {
+app.post('/documents/:id/delete', requireAuth, (req, res) => {
   const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
   if (!d || !canAccessStaff(req.user, d.user_id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   try { fs.unlinkSync(path.join(UPLOADS_DIR, path.basename(d.file_path))); } catch {}
@@ -413,7 +413,7 @@ app.post('/staff/:id/employment', requireAuth, (req, res) => {
   audit(req.user, 'add_employment', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
-app.get('/staff/:id/employment/:eid/delete', requireAuth, (req, res) => {
+app.post('/staff/:id/employment/:eid/delete', requireAuth, (req, res) => {
   if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   db.prepare('DELETE FROM employment_history WHERE id=? AND user_id=?').run(req.params.eid, req.params.id);
   audit(req.user, 'delete_employment', Number(req.params.id));
@@ -426,7 +426,7 @@ app.post('/staff/:id/references', requireAuth, (req, res) => {
   audit(req.user, 'add_reference', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
-app.get('/staff/:id/references/:rid/delete', requireAuth, (req, res) => {
+app.post('/staff/:id/references/:rid/delete', requireAuth, (req, res) => {
   if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   db.prepare('DELETE FROM reference_checks WHERE id=? AND user_id=?').run(req.params.rid, req.params.id);
   audit(req.user, 'delete_reference', Number(req.params.id));
