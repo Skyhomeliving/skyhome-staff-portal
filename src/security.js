@@ -10,7 +10,7 @@ export const securityMiddleware = (app) => {
   // refreshing the GET /login page must not count toward the limit.
   app.post('/login', rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 5,
+    max: Number(process.env.LOGIN_RATELIMIT_MAX || 5),
     standardHeaders: true,
     legacyHeaders: false,
     message: 'Too many login attempts. Please wait 15 minutes.'

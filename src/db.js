@@ -197,7 +197,12 @@ function ensureColumns(table, columns) {
 
 // Legacy DBs may also be missing some base columns (e.g. users.name); reconcile both.
 function reconcileSchema() {
-  ensureColumns('users', { name: 'TEXT' });
+  ensureColumns('users', {
+    name: 'TEXT',
+    failed_logins: 'INTEGER NOT NULL DEFAULT 0',
+    locked_until: 'INTEGER NOT NULL DEFAULT 0',
+    last_login_at: 'INTEGER NOT NULL DEFAULT 0',
+  });
   ensureColumns('profiles', NEW_PROFILE_COLUMNS);
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)');

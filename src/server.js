@@ -11,6 +11,7 @@ import { db, UPLOADS_DIR } from './db.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession, setSessionCookie,
   attachUser, requireAuth, requireRole, canAccessStaff, audit, SESSION_COOKIE,
+  loginLockRemaining, registerLoginFailure, registerLoginSuccess,
 } from './auth.js';
 import {
   PROFILE_SECTIONS, PROFILE_KEYS, SELF_EDITABLE_KEYS, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance, daysUntil,
@@ -56,8 +57,16 @@ app.get('/branding/logo', (_req, res) => { const p = customLogoPath(); if (!p) r
 app.get('/login', (req, res) => res.send(loginPage({ message: req.query.registered ? 'Account created — please sign in.' : '' })));
 app.post('/login', (req, res) => {
   const u = getUserByEmail(req.body.email);
-  if (!u || !verifyPassword(req.body.password || '', u.password))
+  const lockMs = loginLockRemaining(u);
+  if (lockMs > 0) {
+    audit(u, 'login_blocked_locked');
+    return res.status(429).send(loginPage({ error: `Too many failed attempts. Try again in ${Math.ceil(lockMs / 60000)} minute(s), or contact your manager.` }));
+  }
+  if (!u || !verifyPassword(req.body.password || '', u.password)) {
+    if (u && registerLoginFailure(u)) audit(u, 'account_locked', null, 'too many failed logins');
     return res.status(401).send(loginPage({ error: 'Incorrect email or password.' }));
+  }
+  registerLoginSuccess(u);
   const token = createSession(u.id); setSessionCookie(res, token); audit(u, 'login');
   res.redirect('/');
 });

@@ -45,6 +45,32 @@ export function setSessionCookie(res, token) {
   });
 }
 
+// --- Account lockout (targeted brute-force protection, complements the
+//     IP rate-limit on /login) ----------------------------------------------
+const MAX_FAILS = Number(process.env.LOGIN_MAX_FAILS || 5);
+const LOCK_MS = Number(process.env.LOGIN_LOCK_MINUTES || 15) * 60000;
+
+// Milliseconds left on an active lock for this account, else 0.
+export function loginLockRemaining(user) {
+  if (!user || !user.locked_until) return 0;
+  return user.locked_until > Date.now() ? user.locked_until - Date.now() : 0;
+}
+
+// Returns true if this failure tripped the lock.
+export function registerLoginFailure(user) {
+  if (!user) return false;
+  const fails = (user.failed_logins || 0) + 1;
+  const locked = fails >= MAX_FAILS;
+  const lockedUntil = locked ? Date.now() + LOCK_MS : (user.locked_until || 0);
+  db.prepare('UPDATE users SET failed_logins=?, locked_until=? WHERE id=?').run(fails, lockedUntil, user.id);
+  return locked;
+}
+
+export function registerLoginSuccess(user) {
+  db.prepare('UPDATE users SET failed_logins=0, locked_until=0, last_login_at=? WHERE id=?')
+    .run(Date.now(), user.id);
+}
+
 export function audit(actor, action, targetUserId = null, details = '') {
   db.prepare(
     'INSERT INTO audit_log (actor_user_id, actor_email, action, target_user_id, details, created_at) VALUES (?,?,?,?,?,?)'
