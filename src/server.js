@@ -16,7 +16,7 @@ import {
   createPasswordReset, getValidReset, consumePasswordReset,
 } from './auth.js';
 import {
-  PROFILE_SECTIONS, PROFILE_KEYS, SELF_EDITABLE_KEYS, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance, daysUntil,
+  PROFILE_SECTIONS, PROFILE_KEYS, isSelfEditableKey, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance, daysUntil,
   ROLES, isFrontline, isOversight, isManagerLevel,
 } from './compliance.js';
 import { seedAdmin, seedDemo } from './seed.js';
@@ -331,13 +331,13 @@ app.get('/staff/:id/edit', requireAuth, (req, res) => {
   const sections = PROFILE_SECTIONS.map((s) => `
     <div class="card" id="${s.id}" style="margin-bottom:1rem"><div class="card-h">${esc(s.title)}</div>
       <div class="card-b"><div class="form-grid">${s.fields.map((f) =>
-        (isManager || SELF_EDITABLE_KEYS.has(f.key)) ? renderEditField(f, p[f.key]) : renderViewField(f, p[f.key])
+        (isManager || isSelfEditableKey(f.key)) ? renderEditField(f, p[f.key]) : renderViewField(f, p[f.key])
       ).join('')}</div></div></div>`).join('');
   const cats = DOCUMENT_CATEGORIES.map((c) => `<option value="${c.value}">${esc(c.label)}</option>`).join('');
   const body = `
   <div class="page-head"><div><h1>Edit record</h1><p class="muted">${esc(p.full_name || u.email)}</p></div>
     <a class="btn ghost" href="/staff/${u.id}">Cancel</a></div>
-  ${!isManager ? `<div class="flash info">Your compliance details (DBS, Right to Work, training, references) are kept up to date by your manager and shown here read-only. You can update your contact &amp; emergency details, and upload documents below for your manager to approve.</div>` : ''}
+  ${!isManager ? `<div class="flash info">Please fill in your own details below and upload your documents. The <b>verification fields</b> (DBS, Right to Work and training <i>status</i>) are confirmed by your manager and shown read-only — that's why they can't be edited here.</div>` : ''}
   <form method="post" action="/staff/${u.id}">
     ${sections}
     <div style="position:sticky;bottom:0;background:linear-gradient(#fff0,#fff 40%);padding:1rem 0">
@@ -374,7 +374,7 @@ app.post('/staff/:id', requireAuth, (req, res) => {
   // Managers/admins may edit the whole record; a staff member editing their own
   // record may only change contact details — never their own compliance status.
   const isManager = isManagerLevel(req.user.role);
-  const editableKeys = isManager ? PROFILE_KEYS : PROFILE_KEYS.filter((k) => SELF_EDITABLE_KEYS.has(k));
+  const editableKeys = isManager ? PROFILE_KEYS : PROFILE_KEYS.filter(isSelfEditableKey);
   const checkboxKeys = new Set(PROFILE_SECTIONS.flatMap((s) => s.fields.filter((f) => f.type === 'checkbox').map((f) => f.key)));
   const sets = [], vals = [];
   for (const k of editableKeys) {

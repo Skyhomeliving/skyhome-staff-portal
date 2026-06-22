@@ -137,14 +137,38 @@ export const PROFILE_SECTIONS = [
 // All editable profile keys (used for safe updates).
 export const PROFILE_KEYS = PROFILE_SECTIONS.flatMap((s) => s.fields.map((f) => f.key));
 
-// Fields a non-manager may edit on their OWN record. Everything else — DBS,
-// Right to Work, training, professional registration, status, references — is
-// manager-maintained, so staff cannot self-certify their own compliance.
-// (Staff can still upload documents; those land 'pending' for manager approval.)
-export const SELF_EDITABLE_KEYS = new Set([
-  'preferred_name', 'phone', 'home_address',
-  'emergency_contact_name', 'emergency_contact_phone',
+// Fields ONLY a manager/admin may set — the verification & HR decisions that a
+// staff member must not be able to self-certify (e.g. marking their own DBS
+// "Clear" or Right to Work "Confirmed"). Everything NOT in this set is editable
+// by the staff member on their own record, so they can complete their own
+// onboarding details (personal info, document numbers, qualifications, etc.).
+export const MANAGER_ONLY_KEYS = new Set([
+  // Employment / HR decisions
+  'job_title', 'department', 'location', 'start_date', 'employment_type', 'line_manager', 'status',
+  // Right to Work — employer verifies
+  'right_to_work_status', 'right_to_work_expiry', 'is_sponsored', 'share_code_checked_date', 'cos_reference',
+  // DBS — employer-processed clearance
+  'dbs_status', 'dbs_expiry', 'dbs_update_service',
+  // Care Certificate (verified completion)
+  'care_certificate_status', 'care_certificate_date',
+  // Training validity (drives compliance status)
+  'mandatory_training_date', 'mandatory_training_expiry',
+  'safeguarding_training_date', 'safeguarding_training_expiry',
+  'moving_handling_date', 'moving_handling_expiry',
+  'medication_training_date', 'medication_training_expiry',
+  'first_aid_date', 'first_aid_expiry',
+  // Professional registration (verified)
+  'professional_reg_body', 'professional_reg_number', 'professional_reg_expiry',
+  // Health / fitness (verified)
+  'health_declaration_status', 'health_declaration_date', 'occupational_health_status', 'occupational_health_date',
+  // References & supervision (recorded by the manager)
+  'references_received', 'last_supervision_date', 'last_appraisal_date',
+  // Internal notes
+  'notes',
 ]);
+
+// A staff member may edit any profile field that isn't manager-only.
+export const isSelfEditableKey = (key) => !MANAGER_ONLY_KEYS.has(key);
 
 // Every date field marked expiry:true becomes a tracked renewal.
 export const EXPIRY_TRACKERS = PROFILE_SECTIONS.flatMap((s) =>
