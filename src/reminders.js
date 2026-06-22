@@ -63,6 +63,12 @@ function buildHtml(items) {
     <p style="color:#999;font-size:12px;margin-top:22px">Automated reminder from the Sky Home Living staff compliance portal. Confidential — contains personal data.</p></div>` };
 }
 
+// Generic transactional send (password reset, etc.) reusing the SMTP transport.
+export async function sendMail({ to, subject, html, text }) {
+  if (!mailConfigured()) throw new Error('Email (SMTP) is not configured.');
+  return transport().sendMail({ from: `"Sky Home Living" <${FROM}>`, to, subject, html, text });
+}
+
 export async function sendDigest() {
   if (!mailConfigured()) return { sent: false, reason: 'Email (SMTP) is not configured yet.' };
   const to = recipients();

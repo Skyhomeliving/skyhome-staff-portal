@@ -45,6 +45,36 @@ export function setSessionCookie(res, token) {
   });
 }
 
+// --- Password reset (single-use, time-limited tokens) ----------------------
+const RESET_TTL_MS = 1000 * 60 * 60; // 1 hour
+
+export function createPasswordReset(userId) {
+  const token = randomBytes(32).toString('hex');
+  const now = Date.now();
+  db.prepare('INSERT INTO password_resets (user_id, token, created_at, expires_at) VALUES (?,?,?,?)')
+    .run(userId, token, now, now + RESET_TTL_MS);
+  return token;
+}
+
+export function getValidReset(token) {
+  if (!token) return null;
+  const row = db.prepare('SELECT * FROM password_resets WHERE token=?').get(token);
+  if (!row || row.used_at || row.expires_at < Date.now()) return null;
+  return row;
+}
+
+// Sets the new password, marks the token used, and revokes all of the user's
+// existing sessions. Returns the user id on success, else null.
+export function consumePasswordReset(token, newPassword) {
+  const row = getValidReset(token);
+  if (!row) return null;
+  db.prepare('UPDATE users SET password=?, failed_logins=0, locked_until=0 WHERE id=?')
+    .run(hashPassword(newPassword), row.user_id);
+  db.prepare('UPDATE password_resets SET used_at=? WHERE id=?').run(Date.now(), row.id);
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(row.user_id);
+  return row.user_id;
+}
+
 // --- Account lockout (targeted brute-force protection, complements the
 //     IP rate-limit on /login) ----------------------------------------------
 const MAX_FAILS = Number(process.env.LOGIN_MAX_FAILS || 5);

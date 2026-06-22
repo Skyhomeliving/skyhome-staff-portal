@@ -150,6 +150,16 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT
   );
+
+  -- Single-use password-reset tokens (self-service "forgot password")
+  CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+  );
 `);
 
 // --- Additive compliance columns on profiles (driving licence, Home Office
@@ -207,6 +217,7 @@ function reconcileSchema() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_emphist_user ON employment_history(user_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_resets_token ON password_resets(token)');
 }
 reconcileSchema();
 

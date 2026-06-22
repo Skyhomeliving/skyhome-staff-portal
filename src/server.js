@@ -12,15 +12,16 @@ import {
   hashPassword, verifyPassword, createSession, destroySession, setSessionCookie,
   attachUser, requireAuth, requireRole, canAccessStaff, audit, SESSION_COOKIE,
   loginLockRemaining, registerLoginFailure, registerLoginSuccess,
+  createPasswordReset, getValidReset, consumePasswordReset,
 } from './auth.js';
 import {
   PROFILE_SECTIONS, PROFILE_KEYS, SELF_EDITABLE_KEYS, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance, daysUntil,
 } from './compliance.js';
 import { seedAdmin, seedDemo } from './seed.js';
 import { streamZip, pdfBuffer, writeSummary } from './export.js';
-import { startScheduler, sendDigest, mailConfigured, recipients, lastSentAt } from './reminders.js';
+import { startScheduler, sendDigest, sendMail, mailConfigured, recipients, lastSentAt } from './reminders.js';
 import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js';
-import { layout, loginPage, errorPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, fileKind, fileExt } from './views.js';
+import { layout, loginPage, forgotPage, resetPage, errorPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, fileKind, fileExt } from './views.js';
 import { securityMiddleware } from './security.js';
 import { startBackupScheduler } from './backup.js';
 
@@ -54,7 +55,7 @@ app.get('/healthz', (_req, res) => res.type('text').send('ok'));
 app.get('/branding/logo', (_req, res) => { const p = customLogoPath(); if (!p) return res.status(404).end(); res.sendFile(p); });
 
 // ---- auth ------------------------------------------------------------------
-app.get('/login', (req, res) => res.send(loginPage({ message: req.query.registered ? 'Account created — please sign in.' : '' })));
+app.get('/login', (req, res) => res.send(loginPage({ message: req.query.registered ? 'Account created — please sign in.' : req.query.reset ? 'Your password has been reset — please sign in.' : '' })));
 app.post('/login', (req, res) => {
   const u = getUserByEmail(req.body.email);
   const lockMs = loginLockRemaining(u);
@@ -71,6 +72,47 @@ app.post('/login', (req, res) => {
   res.redirect('/');
 });
 app.get('/logout', (req, res) => { destroySession(req.cookies?.[SESSION_COOKIE]); res.clearCookie(SESSION_COOKIE, { path: '/' }); res.redirect('/login'); });
+
+// ---- password reset (self-service) -----------------------------------------
+app.get('/forgot', (_req, res) => res.send(forgotPage()));
+app.post('/forgot', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const u = email ? getUserByEmail(email) : null;
+  if (u) {
+    try {
+      const token = createPasswordReset(u.id);
+      const link = `${req.protocol}://${req.get('host')}/reset?token=${token}`;
+      await sendMail({
+        to: u.email,
+        subject: 'Reset your Sky Home Living password',
+        text: `We received a request to reset your password.\n\nReset it here (expires in 1 hour, single use):\n${link}\n\nIf you didn't request this, ignore this email — your password won't change.`,
+        html: `<div style="font-family:Segoe UI,Arial,sans-serif;color:#1f2937;max-width:520px">
+          <h2 style="color:#0c2a4d">Reset your password</h2>
+          <p>We received a request to reset the password for your Sky Home Living staff portal account.</p>
+          <p><a href="${link}" style="background:#0c2a4d;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">Choose a new password</a></p>
+          <p style="color:#555;font-size:13px">This link expires in 1 hour and can be used once. If you didn't request it, ignore this email — your password won't change.</p></div>`,
+      });
+      audit(u, 'password_reset_requested');
+    } catch (e) { console.error('[reset] email failed:', e.message); }
+  }
+  // Always neutral — never reveal whether an account exists.
+  res.send(forgotPage({ message: 'If that email matches an account, we have sent a reset link. Please check your inbox.' }));
+});
+app.get('/reset', (req, res) => {
+  const valid = !!getValidReset(req.query.token);
+  res.send(resetPage({ token: String(req.query.token || ''), valid }));
+});
+app.post('/reset', (req, res) => {
+  const token = String(req.body.token || '');
+  if (!getValidReset(token)) return res.status(400).send(resetPage({ valid: false }));
+  const pw = String(req.body.password || '');
+  if (pw.length < 8) return res.send(resetPage({ token, error: 'Choose a password of at least 8 characters.' }));
+  if (pw !== String(req.body.confirm || '')) return res.send(resetPage({ token, error: 'Passwords do not match.' }));
+  const uid = consumePasswordReset(token, pw);
+  if (!uid) return res.status(400).send(resetPage({ valid: false }));
+  audit(getUser(uid), 'password_reset_completed');
+  res.redirect('/login?reset=1');
+});
 
 // ---- registration via invite ----------------------------------------------
 app.get('/register', (req, res) => res.send(registerPage({})));

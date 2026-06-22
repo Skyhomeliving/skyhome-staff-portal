@@ -132,6 +132,46 @@ export function loginPage({ error = '', message = '' } = {}) {
     <button class="btn" style="width:100%;justify-content:center" type="submit">Sign in</button>
   </form>
   <p class="small muted" style="text-align:center;margin-top:1rem">
-    Have an invite code? <a href="/register">Create an account</a></p>
+    <a href="/forgot">Forgot password?</a> · Have an invite code? <a href="/register">Create an account</a></p>
 </div></div></body></html>`;
+}
+
+function authShell(brand, title, inner) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<link rel="icon" href="/favicon.png"><title>${esc(title)} · ${esc(brand.orgName)}</title>
+<link rel="stylesheet" href="/styles.css"></head>
+<body><div class="auth-wrap"><div class="auth-card">${inner}</div></div></body></html>`;
+}
+
+export function forgotPage({ error = '', message = '' } = {}) {
+  const brand = getBranding();
+  return authShell(brand, 'Reset password', `
+    <img class="login-logo" src="${brand.loginLogo}" alt="${esc(brand.orgName)}">
+    <p class="muted" style="text-align:center;margin-top:.1rem;margin-bottom:1rem">Reset your password</p>
+    ${error ? `<div class="flash err">${esc(error)}</div>` : ''}
+    ${message ? `<div class="flash ok">${esc(message)}</div>` : ''}
+    <form method="post" action="/forgot">
+      <div class="field"><label>Email</label><input name="email" type="email" required autofocus></div>
+      <button class="btn" style="width:100%;justify-content:center" type="submit">Email me a reset link</button>
+    </form>
+    <p class="small muted" style="text-align:center;margin-top:1rem"><a href="/login">Back to sign in</a></p>`);
+}
+
+export function resetPage({ token = '', error = '', valid = true } = {}) {
+  const brand = getBranding();
+  const inner = valid ? `
+    <form method="post" action="/reset">
+      <input type="hidden" name="token" value="${esc(token)}">
+      <div class="field"><label>New password</label><input name="password" type="password" minlength="8" required autofocus></div>
+      <div class="field"><label>Confirm new password</label><input name="confirm" type="password" minlength="8" required></div>
+      <button class="btn" style="width:100%;justify-content:center" type="submit">Set new password</button>
+    </form>`
+    : `<div class="flash err">This reset link is invalid or has expired.</div>
+       <p class="small muted" style="text-align:center"><a href="/forgot">Request a new link</a></p>`;
+  return authShell(brand, 'Set new password', `
+    <img class="login-logo" src="${brand.loginLogo}" alt="${esc(brand.orgName)}">
+    <p class="muted" style="text-align:center;margin-top:.1rem;margin-bottom:1rem">Choose a new password</p>
+    ${error ? `<div class="flash err">${esc(error)}</div>` : ''}
+    ${inner}`);
 }

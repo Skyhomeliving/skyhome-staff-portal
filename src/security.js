@@ -15,4 +15,12 @@ export const securityMiddleware = (app) => {
     legacyHeaders: false,
     message: 'Too many login attempts. Please wait 15 minutes.'
   }));
+  // Throttle password-reset requests to prevent email-bombing an address.
+  app.post('/forgot', rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: Number(process.env.FORGOT_RATELIMIT_MAX || 5),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Too many reset requests. Please wait 15 minutes.'
+  }));
 };
