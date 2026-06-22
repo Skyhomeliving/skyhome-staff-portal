@@ -11,10 +11,17 @@
 // CLI:    node --experimental-sqlite src/backup.js
 // In-app: startBackupScheduler() runs it nightly (wired up in server.js).
 //
-// Env:
+// Env (local):
 //   DATA_DIR      data volume (default ./data)
-//   BACKUP_KEEP   how many backups to retain (default 14; 0 = keep all)
+//   BACKUP_KEEP   how many local backups to retain (default 14; 0 = keep all)
 //   BACKUP_HOUR   hour-of-day (0-23) for the nightly job (default 2)
+// Env (off-site, S3-compatible — all three required to enable; absent => skipped):
+//   BACKUP_S3_BUCKET, BACKUP_S3_ACCESS_KEY_ID, BACKUP_S3_SECRET_ACCESS_KEY
+//   BACKUP_S3_ENDPOINT   set for Cloudflare R2 / Backblaze B2 / MinIO; omit for AWS S3
+//   BACKUP_S3_REGION     'auto' for R2 (default); the bucket's real region for AWS S3
+//   BACKUP_S3_PREFIX     optional key prefix, e.g. "skyhome/"
+//   BACKUP_S3_KEEP       remote retention (default = BACKUP_KEEP)
+//   BACKUP_S3_FORCE_PATH_STYLE=1   for MinIO / some B2 setups
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,7 +59,61 @@ export function backedUpToday(d = new Date()) {
   return listBackups().some((f) => f.startsWith(prefix));
 }
 
-export async function runBackup({ prune = false } = {}) {
+// --- off-site upload (S3-compatible: AWS S3, Cloudflare R2, Backblaze B2, MinIO) ---
+// Configured entirely via env vars; absent config => upload is skipped silently.
+function s3Config() {
+  const bucket = process.env.BACKUP_S3_BUCKET;
+  const accessKeyId = process.env.BACKUP_S3_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.BACKUP_S3_SECRET_ACCESS_KEY;
+  if (!bucket || !accessKeyId || !secretAccessKey) return null;
+  return {
+    bucket,
+    prefix: process.env.BACKUP_S3_PREFIX || '',
+    region: process.env.BACKUP_S3_REGION || 'auto',           // 'auto' for R2; real region for AWS S3
+    endpoint: process.env.BACKUP_S3_ENDPOINT || undefined,    // set for R2/B2/MinIO; omit for AWS S3
+    forcePathStyle: process.env.BACKUP_S3_FORCE_PATH_STYLE === '1' || undefined,
+    maxAttempts: Number(process.env.BACKUP_S3_MAX_ATTEMPTS || 3),
+    credentials: { accessKeyId, secretAccessKey },
+  };
+}
+
+export const s3Configured = () => s3Config() !== null;
+
+// Upload one backup zip off-site, then trim remote copies to BACKUP_S3_KEEP
+// (defaults to BACKUP_KEEP). The AWS SDK is imported lazily, so it costs
+// nothing at startup when off-site backups aren't configured.
+export async function uploadBackup(filePath) {
+  const cfg = s3Config();
+  if (!cfg) return { uploaded: false, reason: 'not configured' };
+  const { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } =
+    await import('@aws-sdk/client-s3');
+  const client = new S3Client({
+    region: cfg.region, endpoint: cfg.endpoint, forcePathStyle: cfg.forcePathStyle,
+    maxAttempts: cfg.maxAttempts, credentials: cfg.credentials,
+  });
+  const key = `${cfg.prefix}${path.basename(filePath)}`;
+  await client.send(new PutObjectCommand({
+    Bucket: cfg.bucket, Key: key, ContentType: 'application/zip',
+    Body: fs.createReadStream(filePath), ContentLength: fs.statSync(filePath).size,
+  }));
+
+  // Remote retention: keep the newest `keep` objects under the prefix.
+  const keep = Number(process.env.BACKUP_S3_KEEP ?? process.env.BACKUP_KEEP ?? 14);
+  let pruned = [];
+  if (keep >= 1) {
+    const res = await client.send(new ListObjectsV2Command({ Bucket: cfg.bucket, Prefix: `${cfg.prefix}backup-` }));
+    const keys = (res.Contents || []).map((o) => o.Key)
+      .filter((k) => /backup-\d{8}-\d{6}\.zip$/.test(k)).sort();
+    const stale = keys.slice(0, Math.max(0, keys.length - keep));
+    if (stale.length) {
+      await client.send(new DeleteObjectsCommand({ Bucket: cfg.bucket, Delete: { Objects: stale.map((k) => ({ Key: k })) } }));
+      pruned = stale;
+    }
+  }
+  return { uploaded: true, bucket: cfg.bucket, key, pruned };
+}
+
+export async function runBackup({ prune = false, upload = true } = {}) {
   if (!fs.existsSync(DB_PATH)) throw new Error(`No database at ${DB_PATH}`);
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
   const ts = stamp(new Date());
@@ -80,7 +141,13 @@ export async function runBackup({ prune = false } = {}) {
 
   fs.unlinkSync(snap); // the snapshot now lives inside the zip
   if (prune) pruneBackups();
-  return outPath;
+
+  let remote = { uploaded: false, reason: 'not configured' };
+  if (upload && s3Configured()) {
+    try { remote = await uploadBackup(outPath); }
+    catch (e) { remote = { uploaded: false, reason: e.message }; }
+  }
+  return { path: outPath, remote };
 }
 
 // Daily scheduler: hourly tick, runs once per day after BACKUP_HOUR (default 02:00).
@@ -90,8 +157,10 @@ export function startBackupScheduler() {
     try {
       if (new Date().getHours() < HOUR) return;
       if (backedUpToday()) return;
-      const out = await runBackup({ prune: true });
-      console.log(`[backup] nightly backup written: ${path.basename(out)}`);
+      const { path: out, remote } = await runBackup({ prune: true });
+      const off = remote.uploaded ? ` (off-site: ${remote.key})`
+        : remote.reason === 'not configured' ? '' : ` (off-site FAILED: ${remote.reason})`;
+      console.log(`[backup] nightly backup written: ${path.basename(out)}${off}`);
     } catch (e) { console.error('[backup] error:', e.message); }
   };
   setInterval(tick, 60 * 60 * 1000);
@@ -101,6 +170,11 @@ export function startBackupScheduler() {
 // CLI entry point (only when run directly, not when imported by the server).
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runBackup({ prune: true })
-    .then((p) => console.log(`Backup written: ${p} (${(fs.statSync(p).size / 1024 / 1024).toFixed(2)} MB)`))
+    .then(({ path: p, remote }) => {
+      console.log(`Backup written: ${p} (${(fs.statSync(p).size / 1024 / 1024).toFixed(2)} MB)`);
+      if (remote.uploaded) console.log(`Off-site: uploaded to s3://${remote.bucket}/${remote.key}`
+        + (remote.pruned?.length ? ` (pruned ${remote.pruned.length} old remote copies)` : ''));
+      else console.log(`Off-site: skipped (${remote.reason})`);
+    })
     .catch((e) => { console.error('Backup failed:', e.message); process.exit(1); });
 }
