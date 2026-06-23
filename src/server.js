@@ -148,6 +148,7 @@ app.get('/', requireAuth, (req, res) => {
   for (const r of rows) { tot[r.c.rag]++; tot.expired += r.c.counts.expired; tot.critical += r.c.counts.critical; }
   const attention = rows.filter((r) => r.c.rag !== 'green')
     .sort((a, b) => (b.c.counts.expired - a.c.counts.expired) || (b.c.counts.critical - a.c.counts.critical));
+  const incomplete = scoreAllStaff().filter((s) => s.pct < 100).sort((a, b) => a.pct - b.pct);
 
   const body = `
   <div class="page-head"><div><h1>Compliance dashboard</h1>
@@ -171,6 +172,15 @@ app.get('/', requireAuth, (req, res) => {
           <td>${a ? `${esc(a.label)} — ${a.days < 0 ? `expired ${-a.days}d ago` : `in ${a.days}d`}` : '—'}</td></tr>`;
       }).join('')}
     </tbody></table>` : `<div class="card-b muted">Everyone is compliant. 🎉</div>`}
+    </div></div>
+  <div class="card" style="margin-top:1.2rem"><div class="card-h">Incomplete files
+    <span class="muted small" style="font-weight:400">· ${incomplete.length} below 100%</span></div>
+    <div class="card-b" style="padding:0">
+    ${incomplete.length ? `<table class="tbl"><thead><tr><th>Staff</th><th>Complete</th><th>Still needed</th></tr></thead><tbody>
+      ${incomplete.slice(0, 12).map((s) => `<tr onclick="location='/staff/${s.id}'" style="cursor:pointer">
+        <td><b>${esc(s.name)}</b></td><td><span class="chip ${s.rag}">${s.pct}%</span></td>
+        <td class="muted small">${esc(s.missing.join(', '))}</td></tr>`).join('')}
+    </tbody></table>` : `<div class="card-b muted">Every staff file is complete. 🎉</div>`}
     </div></div>`;
   res.send(layout({ user: req.user, title: 'Dashboard', active: '/', body, scripts: '' }));
 });
@@ -180,6 +190,7 @@ app.get('/staff', requireOversight, (req, res) => {
   const q = String(req.query.q || '').toLowerCase();
   const filter = String(req.query.filter || 'all');
   let all = listStaff().map((s) => ({ ...s, c: computeCompliance(s), ndocs: db.prepare('SELECT COUNT(*) n FROM documents WHERE user_id=?').get(s.id).n }));
+  const comp = new Map(scoreAllStaff().map((s) => [s.id, s]));
   if (q) all = all.filter((r) => `${r.full_name} ${r.email} ${r.job_title}`.toLowerCase().includes(q));
   const counts = { all: all.length, red: all.filter((r) => r.c.rag === 'red').length, amber: all.filter((r) => r.c.rag === 'amber').length, green: all.filter((r) => r.c.rag === 'green').length };
   const rows = filter === 'all' ? all : all.filter((r) => r.c.rag === filter);
@@ -188,6 +199,7 @@ app.get('/staff', requireOversight, (req, res) => {
   const chip = (label, lvl) => `<span class="chip ${lvl}">${esc(label)}</span>`;
   const dbsChip = (r) => { const s = (r.dbs_status || '').toLowerCase(); return r.dbs_status ? chip('DBS', s.includes('clear') ? 'green' : s.includes('pend') ? 'amber' : 'red') : ''; };
   const rtwChip = (r) => { const s = (r.right_to_work_status || '').toLowerCase(); return r.right_to_work_status ? chip('RTW', s.includes('confirm') ? 'green' : s.includes('pend') ? 'amber' : 'red') : ''; };
+  const fileChip = (r) => { const fc = comp.get(r.id); if (!fc) return '—'; const t = fc.missing.length ? `Missing: ${fc.missing.join(', ')}` : 'Complete'; return `<span class="chip ${fc.rag}" title="${esc(t)}">${fc.pct}%</span>`; };
   const body = `
   <div class="page-head"><div><h1>Staff records</h1><p class="muted">${counts.all} staff on file</p></div>
     <a class="btn" href="/admin/invites">${icon('invite')} Invite staff</a></div>
@@ -195,14 +207,15 @@ app.get('/staff', requireOversight, (req, res) => {
     <input name="q" value="${esc(req.query.q || '')}" placeholder="Search name, email or job title…" style="width:100%;max-width:440px;padding:.6rem .8rem;border:1px solid var(--line);border-radius:9px;background:#fff"></form>
   <div class="filters">${pill('all', 'All', counts.all)}${pill('red', 'Action needed', counts.red)}${pill('amber', 'Renewing soon', counts.amber)}${pill('green', 'Compliant', counts.green)}</div>
   <div class="card"><div class="card-b" style="padding:0">
-  <table class="tbl"><thead><tr><th>Name</th><th>Job title</th><th>Compliance</th><th>Docs</th><th>Status</th></tr></thead><tbody>
+  <table class="tbl"><thead><tr><th>Name</th><th>Job title</th><th>Compliance</th><th>File</th><th>Docs</th><th>Status</th></tr></thead><tbody>
   ${rows.map((r) => `<tr onclick="location='/staff/${r.id}'" style="cursor:pointer">
     <td><div style="display:flex;align-items:center;gap:.65rem">${avatarTag(r.id, r.photo_path, r.full_name || r.email, 'sm')}
       <div><b>${esc(r.full_name || '—')}</b><div class="muted small">${esc(r.email)}</div></div></div></td>
     <td>${esc(r.job_title || '—')}${r.is_sponsored ? '<div style="margin-top:.2rem"><span class="chip">Sponsored</span></div>' : ''}</td>
     <td><div class="chips">${dbsChip(r)}${rtwChip(r)}${r.c.counts.expired ? chip(`${r.c.counts.expired} expired`, 'red') : ''}${r.c.counts.critical ? chip(`${r.c.counts.critical} due soon`, 'amber') : ''}${!r.c.counts.expired && !r.c.counts.critical && r.c.rag === 'green' ? chip('Up to date', 'green') : ''}</div></td>
+    <td>${fileChip(r)}</td>
     <td>${r.ndocs}</td>
-    <td>${ragBadge(r.c.rag)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted" style="padding:1rem">No staff match.</td></tr>'}
+    <td>${ragBadge(r.c.rag)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted" style="padding:1rem">No staff match.</td></tr>'}
   </tbody></table></div></div>`;
   res.send(layout({ user: req.user, title: 'Staff', active: '/staff', body }));
 });
