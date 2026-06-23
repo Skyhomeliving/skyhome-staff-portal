@@ -26,6 +26,7 @@ import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js
 import { layout, loginPage, forgotPage, resetPage, errorPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, avatarTag, fileKind, fileExt } from './views.js';
 import { securityMiddleware } from './security.js';
 import { startBackupScheduler } from './backup.js';
+import { scoreAllStaff } from './completeness.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -566,6 +567,11 @@ app.post('/staff/:id/references/:rid/delete', requireAuth, (req, res) => {
   db.prepare('DELETE FROM reference_checks WHERE id=? AND user_id=?').run(req.params.rid, req.params.id);
   audit(req.user, 'delete_reference', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
+});
+
+// ---- completeness API (file-completeness score; manager/admin only) --------
+app.get('/api/completeness', requireManager, (_req, res) => {
+  res.json(scoreAllStaff());
 });
 
 // ---- alerts ----------------------------------------------------------------
