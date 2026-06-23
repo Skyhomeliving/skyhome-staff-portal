@@ -46,6 +46,18 @@ export function avatarClass(s) {
   for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
   return 'a' + (h % 6);
 }
+
+// Avatar that shows the uploaded profile photo when present, else coloured initials.
+// kind: 'sm' (32px list avatar) | 'lg' (64px profile hero).
+export function avatarTag(id, photoPath, name, kind = 'sm') {
+  if (photoPath) {
+    const cls = kind === 'lg' ? 'av av-img' : 'avatar avatar-img';
+    return `<img class="${cls}" src="/staff/${id}/photo" alt="${esc(name || '')}" loading="lazy">`;
+  }
+  return kind === 'lg'
+    ? `<div class="av ${avatarClass(name)}">${initials(name)}</div>`
+    : `<div class="avatar ${avatarClass(name)}">${initials(name)}</div>`;
+}
 export function fileKind(p) {
   const s = String(p || '').toLowerCase();
   if (/\.pdf$/.test(s) || s.includes('pdf')) return 'pdf';

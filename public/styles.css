@@ -106,6 +106,27 @@ table.tbl tr:last-child td{border-bottom:0}
 .flash.err{background:var(--red-bg);color:var(--red)} .flash.ok{background:var(--green-bg);color:var(--green)}
 .flash.info{background:var(--blue-bg);color:var(--blue)}
 
+/* Profile photos (override the initials-avatar look for <img>) */
+img.avatar-img{object-fit:cover;background:none;padding:0}
+img.av-img{object-fit:cover;background:none}
+.photo-edit{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+.photo-form{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+.photo-form input[type=file]{font:inherit;max-width:100%}
+
+/* ---- Mobile usability ---- */
+@media (max-width:760px){
+  .content{padding:1rem .9rem}
+  /* Tables scroll horizontally instead of breaking the layout */
+  .card-b{overflow-x:auto}
+  table.tbl th, table.tbl td{white-space:nowrap}
+  /* Bigger tap targets for frontline use */
+  .btn{min-height:42px}
+  .iconbtn{min-height:38px}
+  .filters a, .sectnav a{min-height:38px;display:inline-flex;align-items:center}
+  .topbar{height:54px}
+  h1{font-size:1.3rem}
+}
+
 /* Link-styled button (for inline POST actions that used to be links) */
 .linkbtn{background:none;border:0;padding:0;font:inherit;color:var(--navy-600);cursor:pointer;text-decoration:underline}
 .linkbtn:hover{color:var(--navy)}

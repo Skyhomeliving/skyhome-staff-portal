@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-import { db, UPLOADS_DIR } from './db.js';
+import { db, UPLOADS_DIR, PHOTOS_DIR } from './db.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession, setSessionCookie,
   attachUser, requireAuth, requireRole, requireOversight, requireManager, requireAdmin,
@@ -23,7 +23,7 @@ import { seedAdmin, seedDemo } from './seed.js';
 import { streamZip, pdfBuffer, writeSummary } from './export.js';
 import { startScheduler, sendDigest, sendMail, mailConfigured, recipients, lastSentAt } from './reminders.js';
 import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js';
-import { layout, loginPage, forgotPage, resetPage, errorPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, fileKind, fileExt } from './views.js';
+import { layout, loginPage, forgotPage, resetPage, errorPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, avatarTag, fileKind, fileExt } from './views.js';
 import { securityMiddleware } from './security.js';
 import { startBackupScheduler } from './backup.js';
 
@@ -196,7 +196,7 @@ app.get('/staff', requireOversight, (req, res) => {
   <div class="card"><div class="card-b" style="padding:0">
   <table class="tbl"><thead><tr><th>Name</th><th>Job title</th><th>Compliance</th><th>Docs</th><th>Status</th></tr></thead><tbody>
   ${rows.map((r) => `<tr onclick="location='/staff/${r.id}'" style="cursor:pointer">
-    <td><div style="display:flex;align-items:center;gap:.65rem"><div class="avatar ${avatarClass(r.full_name || r.email)}">${initials(r.full_name || r.email)}</div>
+    <td><div style="display:flex;align-items:center;gap:.65rem">${avatarTag(r.id, r.photo_path, r.full_name || r.email, 'sm')}
       <div><b>${esc(r.full_name || '—')}</b><div class="muted small">${esc(r.email)}</div></div></div></td>
     <td>${esc(r.job_title || '—')}${r.is_sponsored ? '<div style="margin-top:.2rem"><span class="chip">Sponsored</span></div>' : ''}</td>
     <td><div class="chips">${dbsChip(r)}${rtwChip(r)}${r.c.counts.expired ? chip(`${r.c.counts.expired} expired`, 'red') : ''}${r.c.counts.critical ? chip(`${r.c.counts.critical} due soon`, 'amber') : ''}${!r.c.counts.expired && !r.c.counts.critical && r.c.rag === 'green' ? chip('Up to date', 'green') : ''}</div></td>
@@ -282,7 +282,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
 
   const body = `
   <div class="hero">
-    <div class="av ${avatarClass(p.full_name || u.email)}">${initials(p.full_name || u.email)}</div>
+    ${avatarTag(u.id, p.photo_path, p.full_name || u.email, 'lg')}
     <div class="hero-meta">
       <h1>${esc(p.full_name || u.email)}</h1>
       <div class="sub">${esc(p.job_title || roleLabel(u.role))} · ${esc(u.email)}</div>
@@ -349,6 +349,17 @@ app.get('/staff/:id/edit', requireAuth, (req, res) => {
   <div class="page-head"><div><h1>Edit record</h1><p class="muted">${esc(p.full_name || u.email)}</p></div>
     <a class="btn ghost" href="/staff/${u.id}">Cancel</a></div>
   ${!isManager ? `<div class="flash info">Please fill in your own details below and upload your documents. The <b>verification fields</b> (DBS, Right to Work and training <i>status</i>) are confirmed by your manager and shown read-only — that's why they can't be edited here.</div>` : ''}
+  <div class="card" style="margin-bottom:1rem"><div class="card-h">Profile photo</div><div class="card-b">
+    <div class="photo-edit">
+      ${avatarTag(u.id, p.photo_path, p.full_name || u.email, 'lg')}
+      <form method="post" action="/staff/${u.id}/photo" enctype="multipart/form-data" class="photo-form">
+        <input type="file" name="photo" accept=".png,.jpg,.jpeg,.webp,.heic,.heif" required>
+        <button class="btn sm" type="submit">Upload photo</button>
+      </form>
+      ${p.photo_path ? `<form method="post" action="/staff/${u.id}/photo/delete" onsubmit="return confirm('Remove profile photo?')"><button class="btn ghost sm" type="submit">Remove</button></form>` : ''}
+    </div>
+    <p class="small muted" style="margin:.6rem 0 0">A clear head-and-shoulders photo helps colleagues recognise you. PNG, JPG or WebP, up to 5&nbsp;MB.</p>
+  </div></div>
   <form method="post" action="/staff/${u.id}">
     ${sections}
     <div style="position:sticky;bottom:0;background:linear-gradient(#fff0,#fff 40%);padding:1rem 0">
@@ -416,6 +427,17 @@ const upload = multer({
   fileFilter: (_q, file, cb) => cb(null, ALLOWED_EXT.has(path.extname(file.originalname).toLowerCase())),
 });
 
+// Profile photo upload (images only)
+const PHOTO_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif']);
+const photoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_q, _f, cb) => cb(null, PHOTOS_DIR),
+    filename: (req, file, cb) => cb(null, `photo-${req.params.id}-${randomBytes(4).toString('hex')}${path.extname(file.originalname).toLowerCase()}`),
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_q, file, cb) => cb(null, PHOTO_EXT.has(path.extname(file.originalname).toLowerCase())),
+});
+
 app.post('/staff/:id/documents', requireAuth, (req, res) => {
   if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
   upload.single('file')(req, res, (err) => {
@@ -465,6 +487,37 @@ app.post('/documents/:id/reject', requireManager, (req, res) => {
     .run(req.user.email, Date.now(), String(req.body.note || '').slice(0, 300), d.id);
   audit(req.user, 'reject_document', d.user_id, categoryLabel(d.category));
   res.redirect(`/staff/${d.user_id}`);
+});
+
+// ---- profile photo ---------------------------------------------------------
+app.get('/staff/:id/photo', requireAuth, (req, res) => {
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).end();
+  const p = getProfile(req.params.id);
+  if (!p.photo_path) return res.status(404).end();
+  const fp = path.join(PHOTOS_DIR, path.basename(p.photo_path));
+  if (!fs.existsSync(fp)) return res.status(404).end();
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.sendFile(fp);
+});
+app.post('/staff/:id/photo', requireAuth, (req, res) => {
+  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
+  photoUpload.single('photo')(req, res, (err) => {
+    if (err) return res.status(400).send('Upload failed: ' + err.message);
+    if (!req.file) return res.status(400).send('Choose a PNG, JPG or WebP image (up to 5 MB).');
+    const prev = getProfile(req.params.id).photo_path;
+    db.prepare('UPDATE profiles SET photo_path=?, updated_at=? WHERE user_id=?').run(req.file.filename, Date.now(), req.params.id);
+    if (prev && prev !== req.file.filename) { try { fs.unlinkSync(path.join(PHOTOS_DIR, path.basename(prev))); } catch {} }
+    audit(req.user, 'update_photo', Number(req.params.id));
+    res.redirect(`/staff/${req.params.id}/edit`);
+  });
+});
+app.post('/staff/:id/photo/delete', requireAuth, (req, res) => {
+  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
+  const p = getProfile(req.params.id);
+  if (p.photo_path) { try { fs.unlinkSync(path.join(PHOTOS_DIR, path.basename(p.photo_path))); } catch {} }
+  db.prepare("UPDATE profiles SET photo_path='', updated_at=? WHERE user_id=?").run(Date.now(), req.params.id);
+  audit(req.user, 'remove_photo', Number(req.params.id));
+  res.redirect(`/staff/${req.params.id}/edit`);
 });
 
 // ---- exports: compliance pack (PDF summary + ZIP of documents) -------------
