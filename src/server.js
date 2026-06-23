@@ -241,17 +241,28 @@ app.get('/staff/:id', requireAuth, (req, res) => {
       ${s.fields.map((f) => renderViewField(f, p[f.key])).join('')}
       </div></div></div>`).join('');
 
+  const canReview = isManagerLevel(req.user.role);
+  const docStatusChip = (s) => s === 'approved' ? '<span class="chip green">Approved</span>'
+    : s === 'rejected' ? '<span class="chip red">Rejected</span>' : '<span class="chip amber">Pending review</span>';
   const docRowsHtml = docs.map((d) => {
     const kind = fileKind(d.file_path || d.mime_type);
     const dd = d.expiry_date ? daysUntil(d.expiry_date) : null;
     const expCls = dd == null ? '' : dd < 0 ? 'exp-over' : dd <= 60 ? 'exp-soon' : '';
+    const reviewedAt = d.reviewed_at ? fmtDate(new Date(d.reviewed_at).toISOString()) : '';
+    let reviewLine = '';
+    if (d.status === 'approved' && d.reviewed_by_email)
+      reviewLine = `<div class="doc-sub" style="color:var(--green)">Approved by ${esc(d.reviewed_by_email)}${reviewedAt ? ` · ${reviewedAt}` : ''}</div>`;
+    else if (d.status === 'rejected')
+      reviewLine = `<div class="doc-sub" style="color:var(--red)">Rejected${d.reviewed_by_email ? ` by ${esc(d.reviewed_by_email)}` : ''}${reviewedAt ? ` · ${reviewedAt}` : ''}${d.review_note ? ` — ${esc(d.review_note)}` : ''}</div>`;
     return `<div class="doc-row">
       <div class="fileicon ${kind}">${fileExt(d.file_path)}</div>
-      <div class="doc-meta"><div class="doc-title">${esc(d.title || categoryLabel(d.category))}</div>
-        <div class="doc-sub">${esc(categoryLabel(d.category))} · uploaded ${fmtDate(new Date(d.uploaded_at).toISOString())}${d.expiry_date ? ` · <span class="${expCls}">expires ${fmtDate(d.expiry_date)}</span>` : ''}</div></div>
+      <div class="doc-meta"><div class="doc-title">${esc(d.title || categoryLabel(d.category))} ${docStatusChip(d.status)}</div>
+        <div class="doc-sub">${esc(categoryLabel(d.category))} · uploaded ${fmtDate(new Date(d.uploaded_at).toISOString())}${d.expiry_date ? ` · <span class="${expCls}">expires ${fmtDate(d.expiry_date)}</span>` : ''}</div>${reviewLine}</div>
       <div class="doc-actions">
         <a class="iconbtn" href="/documents/${d.id}" target="_blank" rel="noopener">${miniIcon('eye')} View</a>
         <a class="iconbtn" href="/documents/${d.id}?dl=1">${miniIcon('download')} Download</a>
+        ${canReview && d.status !== 'approved' ? `<form method="post" action="/documents/${d.id}/approve" style="display:inline"><button class="iconbtn" type="submit" title="Approve this document">✓ Approve</button></form>` : ''}
+        ${canReview && d.status !== 'rejected' ? `<form method="post" action="/documents/${d.id}/reject" style="display:inline" onsubmit="var r=prompt('Reason for rejecting (optional):','');if(r===null)return false;this.note.value=r;return true;"><input type="hidden" name="note"><button class="iconbtn danger" type="submit" title="Reject this document">Reject</button></form>` : ''}
         ${canEdit ? `<form method="post" action="/documents/${d.id}/delete" style="display:inline" onsubmit="return confirm('Delete this document?')"><button class="iconbtn danger" type="submit" title="Delete">${miniIcon('trash')}</button></form>` : ''}
       </div></div>`;
   }).join('');
@@ -286,7 +297,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
   ${c.alerts.length ? `<div class="card" style="margin-bottom:1rem"><div class="card-h">Renewals & alerts</div><div class="card-b" style="padding:0">
     <table class="tbl"><tbody>${c.alerts.map((a) => `<tr><td>${esc(a.label)}</td><td class="muted">${esc(a.area)}</td>
       <td>${fmtDate(a.date)}</td><td>${levelBadge(a.level, a.days < 0 ? `Expired ${-a.days}d ago` : `${a.days}d left`)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
-  <div class="card" style="margin-bottom:1rem"><div class="card-h"><span>Documents <span class="muted small" style="font-weight:400">· ${docs.length} on file</span></span>
+  <div class="card" style="margin-bottom:1rem"><div class="card-h"><span>Documents <span class="muted small" style="font-weight:400">· ${docs.length} on file${docs.filter((d) => d.status === 'pending').length ? ` · ${docs.filter((d) => d.status === 'pending').length} pending review` : ''}</span></span>
     ${canEdit ? `<a class="btn ghost sm" href="/staff/${u.id}/edit#documents">Upload</a>` : ''}</div>
     <div class="card-b" style="padding:0">${docs.length ? `<div class="doc-list">${docRowsHtml}</div>` : '<div class="card-b muted">No documents uploaded yet.</div>'}</div></div>
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Employment history <span class="muted small">CQC Schedule 3</span></div>
@@ -435,6 +446,24 @@ app.post('/documents/:id/delete', requireAuth, (req, res) => {
   try { fs.unlinkSync(path.join(UPLOADS_DIR, path.basename(d.file_path))); } catch {}
   db.prepare('DELETE FROM documents WHERE id=?').run(d.id);
   audit(req.user, 'delete_document', d.user_id);
+  res.redirect(`/staff/${d.user_id}`);
+});
+
+// ---- document review (manager-level: approve / reject) ---------------------
+app.post('/documents/:id/approve', requireManager, (req, res) => {
+  const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
+  if (!d) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That document no longer exists.' }));
+  db.prepare("UPDATE documents SET status='approved', reviewed_by_email=?, reviewed_at=?, review_note='' WHERE id=?")
+    .run(req.user.email, Date.now(), d.id);
+  audit(req.user, 'approve_document', d.user_id, categoryLabel(d.category));
+  res.redirect(`/staff/${d.user_id}`);
+});
+app.post('/documents/:id/reject', requireManager, (req, res) => {
+  const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
+  if (!d) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That document no longer exists.' }));
+  db.prepare("UPDATE documents SET status='rejected', reviewed_by_email=?, reviewed_at=?, review_note=? WHERE id=?")
+    .run(req.user.email, Date.now(), String(req.body.note || '').slice(0, 300), d.id);
+  audit(req.user, 'reject_document', d.user_id, categoryLabel(d.category));
   res.redirect(`/staff/${d.user_id}`);
 });
 

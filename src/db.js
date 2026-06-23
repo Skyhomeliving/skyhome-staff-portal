@@ -215,6 +215,11 @@ function reconcileSchema() {
   });
   ensureColumns('profiles', NEW_PROFILE_COLUMNS);
   ensureColumns('invite_codes', { role: "TEXT NOT NULL DEFAULT 'carer'" });
+  ensureColumns('documents', {
+    reviewed_by_email: "TEXT NOT NULL DEFAULT ''",
+    reviewed_at: 'INTEGER NOT NULL DEFAULT 0',
+    review_note: "TEXT NOT NULL DEFAULT ''",
+  });
   db.exec('CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_emphist_user ON employment_history(user_id)');
