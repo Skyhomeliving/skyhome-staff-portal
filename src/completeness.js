@@ -18,6 +18,8 @@ const REQUIRED = [
   { field: 'care_certificate_date',   label: 'Care Certificate date' },
   { field: 'references_count',        label: 'References (min 2 received)', check: (v) => Number(v) >= 2 },
   { field: 'health_declaration_date', label: 'Health declaration' },
+  { field: 'last_supervision_date',   label: 'Last supervision recorded' },
+  { field: 'last_appraisal_date',     label: 'Last appraisal recorded' },
 ];
 
 export function scoreStaff(staff) {
@@ -40,7 +42,7 @@ export function scoreAllStaff(db = defaultDb) {
     SELECT u.id AS id, u.email AS email,
       p.full_name, p.dbs_certificate_number, p.dbs_issue_date,
       p.right_to_work_type, p.right_to_work_status, p.care_certificate_date,
-      p.health_declaration_date,
+      p.health_declaration_date, p.last_supervision_date, p.last_appraisal_date,
       (SELECT COUNT(*) FROM reference_checks r
          WHERE r.user_id = u.id AND r.status = 'received') AS references_count
     FROM users u
