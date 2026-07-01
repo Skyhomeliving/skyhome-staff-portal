@@ -57,6 +57,15 @@ app.use(attachUser);
 app.get('/healthz', (_req, res) => res.type('text').send('ok'));
 app.get('/branding/logo', (_req, res) => { const p = customLogoPath(); if (!p) return res.status(404).end(); res.sendFile(p); });
 
+// A staff member whose manager issued a temporary password must set their own
+// before reaching anything else. (/healthz and /branding/logo are handled above.)
+app.use((req, res, next) => {
+  if (req.user?.must_change_password && req.path !== '/account/password' && req.path !== '/logout') {
+    return res.redirect('/account/password');
+  }
+  next();
+});
+
 // ---- auth ------------------------------------------------------------------
 app.get('/login', (req, res) => res.send(loginPage({ message: req.query.registered ? 'Account created — please sign in.' : req.query.reset ? 'Your password has been reset — please sign in.' : '' })));
 app.post('/login', (req, res) => {
@@ -75,6 +84,20 @@ app.post('/login', (req, res) => {
   res.redirect('/');
 });
 app.get('/logout', (req, res) => { destroySession(req.cookies?.[SESSION_COOKIE]); res.clearCookie(SESSION_COOKIE, { path: '/' }); res.redirect('/login'); });
+
+// ---- change own password (also the forced flow after a temp password) ------
+app.get('/account/password', requireAuth, (req, res) => {
+  res.send(changePasswordPage({ forced: !!req.user.must_change_password }));
+});
+app.post('/account/password', requireAuth, (req, res) => {
+  const forced = !!req.user.must_change_password;
+  const pw = String(req.body.password || '');
+  if (pw.length < 8) return res.send(changePasswordPage({ forced, error: 'Choose a password of at least 8 characters.' }));
+  if (pw !== String(req.body.confirm || '')) return res.send(changePasswordPage({ forced, error: 'Passwords do not match.' }));
+  db.prepare('UPDATE users SET password=?, must_change_password=0 WHERE id=?').run(hashPassword(pw), req.user.id);
+  audit(req.user, 'change_own_password');
+  res.redirect('/');
+});
 
 // ---- password reset (self-service) -----------------------------------------
 app.get('/forgot', (_req, res) => res.send(forgotPage()));
@@ -618,6 +641,69 @@ app.post('/admin/send-reminders', requireManager, async (req, res) => {
   res.redirect(r.sent ? `/alerts?reminder=sent&n=${r.to.length}` : `/alerts?reminder=error&msg=${encodeURIComponent(r.reason)}`);
 });
 
+// ---- manager password-reset fallback (for staff who can't receive email) ---
+app.get('/manager/password-resets', requireManager, (req, res) => {
+  const origin = `${req.protocol}://${req.get('host')}`;
+  const now = Date.now();
+  const outstanding = db.prepare(
+    `SELECT pr.token, pr.created_at, pr.expires_at, u.email
+       FROM password_resets pr JOIN users u ON u.id = pr.user_id
+      WHERE pr.used_at IS NULL AND pr.expires_at > ?
+      ORDER BY pr.created_at DESC`
+  ).all(now);
+  const staff = listStaff();
+  const linkRows = outstanding.map((r) => {
+    const url = `${origin}/reset?token=${r.token}`;
+    return `<tr>
+      <td><b>${esc(r.email)}</b></td>
+      <td class="small">${new Date(r.created_at).toLocaleString('en-GB')}</td>
+      <td class="small">${new Date(r.expires_at).toLocaleString('en-GB')}</td>
+      <td><div style="display:flex;gap:.4rem;align-items:center">
+        <input class="reset-url" value="${esc(url)}" readonly onclick="this.select()" style="flex:1;min-width:220px;font-size:.78rem;padding:.35rem .5rem;border:1px solid var(--line);border-radius:7px;background:#fff">
+        <button type="button" class="btn ghost sm" data-copy="${esc(url)}">Copy</button></div></td></tr>`;
+  }).join('') || '<tr><td colspan="4" class="muted" style="padding:1rem">No outstanding self-service reset links.</td></tr>';
+  const body = `
+  <div class="page-head"><div><h1>Password resets</h1><p class="muted">Help staff who can't receive the reset email</p></div></div>
+  ${req.query.set ? '<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#1a7f4b">✓ Temporary password set. The staff member must change it the next time they sign in, and any existing sessions were ended.</div></div>' : ''}
+  ${req.query.err ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#b42318">${esc(req.query.err)}</div></div>` : ''}
+  <div class="card" style="margin-bottom:1.2rem"><div class="card-h">Set a temporary password</div><div class="card-b">
+    <p class="muted small" style="margin-top:0">Choose a staff member and a temporary password to read out to them. They'll be forced to set their own the next time they sign in, and this signs them out of any existing sessions.</p>
+    <form method="post" action="/manager/reset-password"><div class="form-grid">
+      <div class="field"><label>Staff member</label><select name="user_id" required>
+        <option value="">Select…</option>
+        ${staff.map((s) => `<option value="${s.id}">${esc(s.full_name || s.email)} — ${esc(s.email)}</option>`).join('')}
+      </select></div>
+      <div class="field"><label>Temporary password (min 8 characters)</label><input name="temp_password" type="text" minlength="8" required autocomplete="off"></div>
+    </div><button class="btn" type="submit">Set temporary password</button></form>
+  </div></div>
+  <div class="card"><div class="card-h">Outstanding self-service reset links <span class="muted small" style="font-weight:400">· ${outstanding.length}</span></div>
+    <div class="card-b" style="padding:0">
+    <table class="tbl"><thead><tr><th>Staff email</th><th>Requested</th><th>Valid until</th><th>Reset link</th></tr></thead>
+    <tbody>${linkRows}</tbody></table></div></div>`;
+  const scripts = `<script>
+    document.querySelectorAll('[data-copy]').forEach(function(b){
+      b.addEventListener('click',function(){
+        var v=b.getAttribute('data-copy');
+        navigator.clipboard.writeText(v).then(function(){var t=b.textContent;b.textContent='Copied';setTimeout(function(){b.textContent=t;},1200);});
+      });
+    });
+  </script>`;
+  res.send(layout({ user: req.user, title: 'Password resets', active: '/manager/password-resets', body, scripts }));
+});
+
+app.post('/manager/reset-password', requireManager, (req, res) => {
+  const uid = Number(req.body.user_id);
+  const target = uid ? getUser(uid) : null;
+  if (!target || target.role === 'admin') return res.redirect('/manager/password-resets?err=' + encodeURIComponent('Choose a valid staff member.'));
+  const temp = String(req.body.temp_password || '');
+  if (temp.length < 8) return res.redirect('/manager/password-resets?err=' + encodeURIComponent('Temporary password must be at least 8 characters.'));
+  db.prepare('UPDATE users SET password=?, must_change_password=1, failed_logins=0, locked_until=0 WHERE id=?')
+    .run(hashPassword(temp), uid);
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(uid);
+  audit(req.user, 'manager_set_temp_password', uid, target.email);
+  res.redirect('/manager/password-resets?set=1');
+});
+
 // ---- invites ---------------------------------------------------------------
 app.get('/admin/invites', requireManager, (req, res) => {
   const invites = db.prepare('SELECT * FROM invite_codes ORDER BY created_at DESC').all();
@@ -740,6 +826,18 @@ function registerPage({ error = '', code = '', email = '' }) {
       <button class="btn" style="width:100%;justify-content:center">Create account</button>
     </form>
     <p class="small muted" style="text-align:center;margin-top:1rem"><a href="/login">Back to sign in</a></p>`);
+}
+function changePasswordPage({ error = '', forced = false } = {}) {
+  return loginPageShell(`
+    <h1 style="margin-bottom:.2rem">Choose a new password</h1>
+    <p class="muted" style="margin-top:0">${forced ? 'Your manager set a temporary password. Please choose your own to continue.' : 'Update the password for your account.'}</p>
+    ${error ? `<div class="flash err">${esc(error)}</div>` : ''}
+    <form method="post" action="/account/password">
+      <div class="field"><label>New password</label><input name="password" type="password" minlength="8" required></div>
+      <div class="field"><label>Confirm new password</label><input name="confirm" type="password" minlength="8" required></div>
+      <button class="btn" style="width:100%;justify-content:center">Save new password</button>
+    </form>
+    <p class="small muted" style="text-align:center;margin-top:1rem"><a href="/logout">Sign out</a></p>`);
 }
 function loginPageShell(inner) {
   const b = getBranding();

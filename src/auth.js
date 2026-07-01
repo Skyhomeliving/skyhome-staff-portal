@@ -7,6 +7,9 @@ import { isOversight, isManagerLevel, isAdmin } from './compliance.js';
 
 export const SESSION_COOKIE = 'shl_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14; // 14 days
+// Sliding expiry: a still-valid session is pushed out to a fresh full TTL on
+// use, but at most once an hour so we don't write to the DB on every request.
+const SESSION_REFRESH_AFTER_MS = 1000 * 60 * 60; // 1 hour
 
 export const hashPassword = (pw) => bcrypt.hashSync(pw, 10);
 export const verifyPassword = (pw, hash) => {
@@ -24,13 +27,32 @@ export function createSession(userId) {
 export function getSessionUser(token) {
   if (!token) return null;
   const row = db.prepare(
-    `SELECT s.expires_at, u.id, u.email, u.role, u.name
+    `SELECT s.expires_at, u.id, u.email, u.role, u.name, u.must_change_password
        FROM sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token = ?`
   ).get(token);
   if (!row) return null;
   if (row.expires_at < Date.now()) { destroySession(token); return null; }
-  return { id: row.id, email: row.email, role: row.role, name: row.name };
+  return {
+    id: row.id, email: row.email, role: row.role, name: row.name,
+    must_change_password: !!row.must_change_password,
+  };
+}
+
+// Sliding-expiry refresh for a still-valid session. Pushes expires_at out to a
+// fresh full TTL, but only once the session hasn't been extended for at least
+// SESSION_REFRESH_AFTER_MS (throttling DB writes). Returns true when it actually
+// extended the session (so the caller can re-issue the cookie). Never resurrects
+// an expired session — the row's own expiry is the source of truth.
+export function refreshSession(token) {
+  if (!token) return false;
+  const now = Date.now();
+  const row = db.prepare('SELECT expires_at FROM sessions WHERE token = ?').get(token);
+  if (!row || row.expires_at < now) return false;
+  const lastExtendedAt = row.expires_at - SESSION_TTL_MS;
+  if (now - lastExtendedAt < SESSION_REFRESH_AFTER_MS) return false;
+  db.prepare('UPDATE sessions SET expires_at = ? WHERE token = ?').run(now + SESSION_TTL_MS, token);
+  return true;
 }
 
 export const destroySession = (token) =>
@@ -69,7 +91,7 @@ export function getValidReset(token) {
 export function consumePasswordReset(token, newPassword) {
   const row = getValidReset(token);
   if (!row) return null;
-  db.prepare('UPDATE users SET password=?, failed_logins=0, locked_until=0 WHERE id=?')
+  db.prepare('UPDATE users SET password=?, failed_logins=0, locked_until=0, must_change_password=0 WHERE id=?')
     .run(hashPassword(newPassword), row.user_id);
   db.prepare('UPDATE password_resets SET used_at=? WHERE id=?').run(Date.now(), row.id);
   db.prepare('DELETE FROM sessions WHERE user_id=?').run(row.user_id);
@@ -109,8 +131,12 @@ export function audit(actor, action, targetUserId = null, details = '') {
 }
 
 // Middleware ----------------------------------------------------------------
-export function attachUser(req, _res, next) {
-  req.user = getSessionUser(req.cookies?.[SESSION_COOKIE]) || null;
+export function attachUser(req, res, next) {
+  const token = req.cookies?.[SESSION_COOKIE];
+  req.user = getSessionUser(token) || null;
+  // Keep active users signed in: slide the expiry forward (throttled) and
+  // re-issue the cookie with the same maxAge so the browser copy tracks it.
+  if (req.user && refreshSession(token)) setSessionCookie(res, token);
   next();
 }
 

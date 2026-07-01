@@ -77,6 +77,7 @@ function navFor(user) {
   }
   if (isManagerLevel(user.role)) {
     items.push(['/admin/invites', 'invite', 'Invitations']);
+    items.push(['/manager/password-resets', 'badge', 'Password resets']);
     items.push(['/admin/audit', 'audit', 'Audit log']);
   }
   if (isAdmin(user.role)) items.push(['/admin/settings', 'cog', 'Settings']);
