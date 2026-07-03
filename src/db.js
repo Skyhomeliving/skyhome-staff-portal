@@ -218,6 +218,10 @@ function reconcileSchema() {
     // Offboarding: 0 = deactivated (access revoked, sessions killed), 1 = active.
     is_active: 'INTEGER NOT NULL DEFAULT 1',
   });
+  // Confirm the offboarding migration in deploy logs. Runs on every boot; the
+  // ALTER above is a no-op once the column exists, so this reflects reality.
+  const userCols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+  console.log(`[migration] users.is_active column ${userCols.has('is_active') ? 'ready' : 'MISSING'}`);
   ensureColumns('profiles', NEW_PROFILE_COLUMNS);
   ensureColumns('invite_codes', { role: "TEXT NOT NULL DEFAULT 'carer'" });
   ensureColumns('documents', {
