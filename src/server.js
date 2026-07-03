@@ -20,7 +20,7 @@ import {
   ROLES, isFrontline, isOversight, isManagerLevel,
 } from './compliance.js';
 import { seedAdmin, seedDemo } from './seed.js';
-import { streamZip, pdfBuffer, writeSummary } from './export.js';
+import { streamZip, streamCategoryZip, pdfBuffer, writeSummary } from './export.js';
 import { startScheduler, sendDigest, sendMail, mailConfigured, recipients, lastSentAt } from './reminders.js';
 import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js';
 import { layout, loginPage, forgotPage, resetPage, errorPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, avatarTag, fileKind, fileExt } from './views.js';
@@ -42,8 +42,13 @@ app.use(express.static(path.join(ROOT, 'public')));
 const getUser = (id) => db.prepare('SELECT * FROM users WHERE id=?').get(id);
 const getUserByEmail = (e) => db.prepare('SELECT * FROM users WHERE email=?').get(String(e).toLowerCase());
 const getProfile = (uid) => db.prepare('SELECT * FROM profiles WHERE user_id=?').get(uid) || {};
-const listStaff = () => db.prepare(`SELECT u.id,u.email,u.role,p.* FROM users u
-  LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role != 'admin' ORDER BY p.full_name, u.email`).all();
+// Active (non-admin) staff — the default working set for counts, dashboards and
+// alerts. Deactivated (offboarded) staff are excluded here and surfaced
+// separately via listInactiveStaff so they never inflate active counts.
+const listStaff = () => db.prepare(`SELECT u.id,u.email,u.role,u.is_active,p.* FROM users u
+  LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role != 'admin' AND u.is_active = 1 ORDER BY p.full_name, u.email`).all();
+const listInactiveStaff = () => db.prepare(`SELECT u.id,u.email,u.role,u.is_active,p.* FROM users u
+  LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role != 'admin' AND u.is_active = 0 ORDER BY p.full_name, u.email`).all();
 const listDocs = (uid) => db.prepare('SELECT * FROM documents WHERE user_id=? ORDER BY uploaded_at DESC').all(uid);
 const listEmployment = (uid) => db.prepare('SELECT * FROM employment_history WHERE user_id=? ORDER BY from_date DESC, id DESC').all(uid);
 const listReferences = (uid) => db.prepare('SELECT * FROM reference_checks WHERE user_id=? ORDER BY created_at DESC').all(uid);
@@ -56,6 +61,17 @@ startBackupScheduler();
 app.use(attachUser);
 app.get('/healthz', (_req, res) => res.type('text').send('ok'));
 app.get('/branding/logo', (_req, res) => { const p = customLogoPath(); if (!p) return res.status(404).end(); res.sendFile(p); });
+
+// A deactivated account is denied everywhere. attachUser has already revoked the
+// session and cleared the cookie; here we show a clear message rather than a
+// silent redirect. Fires at most once (the session is gone next request).
+app.use((req, res, next) => {
+  if (!req.deactivated) return next();
+  return res.status(403).send(errorPage({
+    code: 403, title: 'Account deactivated',
+    message: 'Your account has been deactivated and you have been signed out of all devices. If you think this is a mistake, contact your manager.',
+  }));
+});
 
 // A staff member whose manager issued a temporary password must set their own
 // before reaching anything else. (/healthz and /branding/logo are handled above.)
@@ -78,6 +94,12 @@ app.post('/login', (req, res) => {
   if (!u || !verifyPassword(req.body.password || '', u.password)) {
     if (u && registerLoginFailure(u)) audit(u, 'account_locked', null, 'too many failed logins');
     return res.status(401).send(loginPage({ error: 'Incorrect email or password.' }));
+  }
+  // Deny deactivated accounts even with the correct password (checked after the
+  // password so we never reveal account state to someone who can't authenticate).
+  if (u.is_active === 0) {
+    audit(u, 'login_blocked_deactivated');
+    return res.status(403).send(loginPage({ error: 'This account has been deactivated. Please contact your manager.' }));
   }
   registerLoginSuccess(u);
   const token = createSession(u.id); setSessionCookie(res, token); audit(u, 'login');
@@ -223,8 +245,38 @@ app.get('/staff', requireOversight, (req, res) => {
   const dbsChip = (r) => { const s = (r.dbs_status || '').toLowerCase(); return r.dbs_status ? chip('DBS', s.includes('clear') ? 'green' : s.includes('pend') ? 'amber' : 'red') : ''; };
   const rtwChip = (r) => { const s = (r.right_to_work_status || '').toLowerCase(); return r.right_to_work_status ? chip('RTW', s.includes('confirm') ? 'green' : s.includes('pend') ? 'amber' : 'red') : ''; };
   const fileChip = (r) => { const fc = comp.get(r.id); if (!fc) return '—'; const t = fc.missing.length ? `Missing: ${fc.missing.join(', ')}` : 'Complete'; return `<span class="chip ${fc.rag}" title="${esc(t)}">${fc.pct}%</span>`; };
+
+  // Bulk export by document type (manager-only): one ZIP of a single category
+  // across all staff. Shows how many documents exist per type.
+  const isMgr = isManagerLevel(req.user.role);
+  const docCounts = new Map(db.prepare('SELECT category, COUNT(*) n FROM documents GROUP BY category').all().map((r) => [r.category, r.n]));
+  const exportItem = (c) => {
+    const n = docCounts.get(c.value) || 0;
+    return n
+      ? `<a class="btn ghost sm" href="/exports/documents/${c.value}.zip" style="justify-content:flex-start" title="Download all ${esc(c.label)} documents as a ZIP">${miniIcon('download')} ${esc(c.label)} <span class="chip" style="margin-left:auto">${n}</span></a>`
+      : `<span class="btn ghost sm" style="justify-content:flex-start;opacity:.5;pointer-events:none">${esc(c.label)} <span class="chip grey" style="margin-left:auto">0</span></span>`;
+  };
+  const exportsPanel = isMgr ? `
+  <div class="card" style="margin-top:1.2rem"><div class="card-h">Export documents by type <span class="muted small" style="font-weight:400">· one ZIP per document type, across all staff</span></div>
+    <div class="card-b"><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:.5rem">
+      ${DOCUMENT_CATEGORIES.map(exportItem).join('')}
+    </div></div></div>` : '';
+
+  // Deactivated (offboarded) staff — kept visible for reactivation but excluded
+  // from the active list and its counts above.
+  const inactive = listInactiveStaff();
+  const inactiveCard = inactive.length ? `
+  <div class="card" style="margin-top:1.2rem"><div class="card-h">Deactivated staff <span class="muted small" style="font-weight:400">· ${inactive.length} · excluded from active counts${isMgr ? ' · open a record to reactivate' : ''}</span></div>
+    <div class="card-b" style="padding:0">
+    <table class="tbl"><tbody>
+    ${inactive.map((r) => `<tr onclick="location='/staff/${r.id}'" style="cursor:pointer;opacity:.72">
+      <td><div style="display:flex;align-items:center;gap:.65rem">${avatarTag(r.id, r.photo_path, r.full_name || r.email, 'sm')}
+        <div><b>${esc(r.full_name || '—')}</b> <span class="badge red">Inactive</span><div class="muted small">${esc(r.email)}</div></div></div></td>
+      <td>${esc(r.job_title || '—')}</td></tr>`).join('')}
+    </tbody></table></div></div>` : '';
+
   const body = `
-  <div class="page-head"><div><h1>Staff records</h1><p class="muted">${counts.all} staff on file</p></div>
+  <div class="page-head"><div><h1>Staff records</h1><p class="muted">${counts.all} active staff on file${inactive.length ? ` · ${inactive.length} deactivated` : ''}</p></div>
     <a class="btn" href="/admin/invites">${icon('invite')} Invite staff</a></div>
   <form method="get" style="margin-bottom:.8rem"><input type="hidden" name="filter" value="${esc(filter)}">
     <input name="q" value="${esc(req.query.q || '')}" placeholder="Search name, email or job title…" style="width:100%;max-width:440px;padding:.6rem .8rem;border:1px solid var(--line);border-radius:9px;background:#fff"></form>
@@ -239,7 +291,9 @@ app.get('/staff', requireOversight, (req, res) => {
     <td>${fileChip(r)}</td>
     <td>${r.ndocs}</td>
     <td>${ragBadge(r.c.rag)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted" style="padding:1rem">No staff match.</td></tr>'}
-  </tbody></table></div></div>`;
+  </tbody></table></div></div>
+  ${exportsPanel}
+  ${inactiveCard}`;
   res.send(layout({ user: req.user, title: 'Staff', active: '/staff', body }));
 });
 
@@ -323,11 +377,14 @@ app.get('/staff/:id', requireAuth, (req, res) => {
     <div class="hero-meta">
       <h1>${esc(p.full_name || u.email)}</h1>
       <div class="sub">${esc(p.job_title || roleLabel(u.role))} · ${esc(u.email)}</div>
-      <div style="margin-top:.55rem;display:flex;gap:.4rem;flex-wrap:wrap">${ragBadge(c.rag)}${p.is_sponsored ? '<span class="badge">Sponsored worker</span>' : ''}${p.status && p.status !== 'active' ? `<span class="badge">${esc(p.status)}</span>` : ''}</div>
+      <div style="margin-top:.55rem;display:flex;gap:.4rem;flex-wrap:wrap">${u.is_active === 0 ? '<span class="badge red">Inactive</span>' : ''}${ragBadge(c.rag)}${p.is_sponsored ? '<span class="badge">Sponsored worker</span>' : ''}${p.status && p.status !== 'active' ? `<span class="badge">${esc(p.status)}</span>` : ''}</div>
     </div>
     <div class="hero-actions">
       ${isOversight(req.user.role) ? `<a class="btn ghost" href="/staff/${u.id}/export.zip" title="ZIP of all documents + PDF summary for CQC/HMRC">${icon('pack')} Document pack</a><a class="btn ghost" href="/staff/${u.id}/summary.pdf">Summary PDF</a>` : ''}
       ${canEdit ? `<a class="btn ghost" href="/staff/${u.id}/edit">Edit record</a>` : ''}
+      ${isManagerLevel(req.user.role) && u.role !== 'admin' && u.id !== req.user.id ? (u.is_active === 0
+        ? `<form method="post" action="/manager/staff/${u.id}/reactivate" style="display:inline"><button class="btn ghost" type="submit" title="Restore access for this staff member">Reactivate</button></form>`
+        : `<form method="post" action="/manager/staff/${u.id}/deactivate" style="display:inline" onsubmit="return confirm('Deactivate this staff member? This immediately signs them out of all devices and blocks sign-in until you reactivate them.')"><button class="btn ghost danger" type="submit" title="Revoke access and sign out of all devices">Deactivate</button></form>`) : ''}
     </div>
   </div>
   ${tilesHtml}
@@ -577,6 +634,24 @@ app.get('/staff/:id/export.zip', requireAuth, async (req, res) => {
   await streamZip(res, { profile: p, user: u, docs, actor: req.user, uploadsDir: UPLOADS_DIR });
 });
 
+// Cross-staff export: every document of one category, across all staff, in a
+// single ZIP. Manager-only (contains many people's personal data at once).
+app.get('/exports/documents/:category.zip', requireManager, async (req, res) => {
+  const category = req.params.category;
+  if (!DOCUMENT_CATEGORIES.some((c) => c.value === category))
+    return res.status(400).send(errorPage({ user: req.user, code: 400, title: 'Unknown document type', message: 'That document type is not recognised.' }));
+  const rows = db.prepare(
+    `SELECT d.*, p.full_name, u.email
+       FROM documents d
+       JOIN users u ON u.id = d.user_id
+       LEFT JOIN profiles p ON p.user_id = u.id
+      WHERE d.category = ?
+      ORDER BY p.full_name, u.email, d.uploaded_at`
+  ).all(category);
+  audit(req.user, 'export_category_zip', null, category);
+  await streamCategoryZip(res, { category, rows, uploadsDir: UPLOADS_DIR });
+});
+
 // ---- employment history & references ---------------------------------------
 app.post('/staff/:id/employment', requireAuth, (req, res) => {
   if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
@@ -702,6 +777,28 @@ app.post('/manager/reset-password', requireManager, (req, res) => {
   db.prepare('DELETE FROM sessions WHERE user_id=?').run(uid);
   audit(req.user, 'manager_set_temp_password', uid, target.email);
   res.redirect('/manager/password-resets?set=1');
+});
+
+// ---- offboarding: deactivate / reactivate (manager-level) ------------------
+// Deactivating revokes access immediately: is_active=0 blocks all future
+// requests and every existing session row is deleted, logging the user out of
+// all devices at once. Reactivating restores sign-in (for rehires/corrections).
+app.post('/manager/staff/:id/deactivate', requireManager, (req, res) => {
+  const u = getUser(req.params.id);
+  if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
+  if (u.role === 'admin') return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'Admin accounts cannot be deactivated here.' }));
+  if (u.id === req.user.id) return res.status(400).send(errorPage({ user: req.user, code: 400, title: 'Not allowed', message: 'You cannot deactivate your own account.' }));
+  db.prepare('UPDATE users SET is_active=0 WHERE id=?').run(u.id);
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(u.id);
+  audit(req.user, 'deactivate_staff', u.id, u.email);
+  res.redirect(`/staff/${u.id}`);
+});
+app.post('/manager/staff/:id/reactivate', requireManager, (req, res) => {
+  const u = getUser(req.params.id);
+  if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
+  db.prepare('UPDATE users SET is_active=1 WHERE id=?').run(u.id);
+  audit(req.user, 'reactivate_staff', u.id, u.email);
+  res.redirect(`/staff/${u.id}`);
 });
 
 // ---- invites ---------------------------------------------------------------

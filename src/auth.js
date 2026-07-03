@@ -6,7 +6,7 @@ import { errorPage } from './views.js';
 import { isOversight, isManagerLevel, isAdmin } from './compliance.js';
 
 export const SESSION_COOKIE = 'shl_session';
-const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14; // 14 days
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
 // Sliding expiry: a still-valid session is pushed out to a fresh full TTL on
 // use, but at most once an hour so we don't write to the DB on every request.
 const SESSION_REFRESH_AFTER_MS = 1000 * 60 * 60; // 1 hour
@@ -27,7 +27,7 @@ export function createSession(userId) {
 export function getSessionUser(token) {
   if (!token) return null;
   const row = db.prepare(
-    `SELECT s.expires_at, u.id, u.email, u.role, u.name, u.must_change_password
+    `SELECT s.expires_at, u.id, u.email, u.role, u.name, u.must_change_password, u.is_active
        FROM sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token = ?`
   ).get(token);
@@ -36,6 +36,7 @@ export function getSessionUser(token) {
   return {
     id: row.id, email: row.email, role: row.role, name: row.name,
     must_change_password: !!row.must_change_password,
+    is_active: row.is_active,
   };
 }
 
@@ -133,7 +134,18 @@ export function audit(actor, action, targetUserId = null, details = '') {
 // Middleware ----------------------------------------------------------------
 export function attachUser(req, res, next) {
   const token = req.cookies?.[SESSION_COOKIE];
-  req.user = getSessionUser(token) || null;
+  const sess = getSessionUser(token);
+  // Offboarding: a deactivated account is denied even if it still presents a
+  // valid, unexpired session cookie. Revoke the session and clear the cookie,
+  // then fall through unauthenticated with a flag so the app can explain why.
+  if (sess && sess.is_active === 0) {
+    destroySession(token);
+    res.clearCookie(SESSION_COOKIE, { path: '/' });
+    req.user = null;
+    req.deactivated = true;
+    return next();
+  }
+  req.user = sess || null;
   // Keep active users signed in: slide the expiry forward (throttled) and
   // re-issue the cookie with the same maxAge so the browser copy tracks it.
   if (req.user && refreshSession(token)) setSessionCookie(res, token);

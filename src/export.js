@@ -85,3 +85,32 @@ export async function streamZip(res, { profile, user, docs, actor, uploadsDir })
   }
   await archive.finalize();
 }
+
+// Cross-staff export: one ZIP holding every document of a single category, one
+// entry per staff member. `rows` come from a documents⨝users⨝profiles query and
+// carry full_name/email for naming. Mirrors streamZip's archiver setup and its
+// fs.existsSync / filename-sanitising guards; skips rows whose file is missing.
+export async function streamCategoryZip(res, { category, rows, uploadsDir }) {
+  const label = categoryLabel(category);
+  const safeCat = label.replace(/[^a-z0-9]+/gi, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'documents';
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="all_${safeCat}_documents.zip"`);
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', () => { try { res.end(); } catch {} });
+  archive.pipe(res);
+  const used = new Set();
+  for (const d of rows) {
+    const fp = path.join(uploadsDir, path.basename(d.file_path));
+    if (!fs.existsSync(fp)) continue;
+    const ext = path.extname(d.file_path) || '';
+    const who = d.full_name || d.email || 'staff';
+    const base = `${who}_${label}`.replace(/[^a-z0-9]+/gi, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'document';
+    // Guarantee unique entry names (same person can have >1 doc of a type, and
+    // two staff can share a name) by suffixing on collision.
+    let name = base + ext, n = 2;
+    while (used.has(name)) { name = `${base}_${n}${ext}`; n++; }
+    used.add(name);
+    archive.file(fp, { name });
+  }
+  await archive.finalize();
+}

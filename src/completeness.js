@@ -47,7 +47,7 @@ export function scoreAllStaff(db = defaultDb) {
          WHERE r.user_id = u.id AND r.status = 'received') AS references_count
     FROM users u
     LEFT JOIN profiles p ON p.user_id = u.id
-    WHERE u.role != 'admin'
+    WHERE u.role != 'admin' AND u.is_active = 1
     ORDER BY p.full_name, u.email
   `).all();
   return rows.map(scoreStaff);

@@ -20,11 +20,11 @@ export const lastSentAt = () => meta.get('last_reminder_at');
 
 export function recipients() {
   if (process.env.REMINDER_RECIPIENTS) return process.env.REMINDER_RECIPIENTS.split(',').map((s) => s.trim()).filter(Boolean);
-  return db.prepare("SELECT email FROM users WHERE role IN ('admin','manager')").all().map((r) => r.email);
+  return db.prepare("SELECT email FROM users WHERE role IN ('admin','manager') AND is_active = 1").all().map((r) => r.email);
 }
 
 export function buildDigest(withinDays = 60) {
-  const staff = db.prepare(`SELECT u.id,u.email,p.* FROM users u LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role != 'admin'`).all();
+  const staff = db.prepare(`SELECT u.id,u.email,p.* FROM users u LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role != 'admin' AND u.is_active = 1`).all();
   const items = [];
   for (const s of staff) for (const a of computeCompliance(s).alerts) if (a.days <= withinDays) items.push({ name: s.full_name || s.email, id: s.id, ...a });
   items.sort((x, y) => x.days - y.days);

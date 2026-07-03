@@ -215,6 +215,8 @@ function reconcileSchema() {
     locked_until: 'INTEGER NOT NULL DEFAULT 0',
     last_login_at: 'INTEGER NOT NULL DEFAULT 0',
     must_change_password: 'INTEGER NOT NULL DEFAULT 0',
+    // Offboarding: 0 = deactivated (access revoked, sessions killed), 1 = active.
+    is_active: 'INTEGER NOT NULL DEFAULT 1',
   });
   ensureColumns('profiles', NEW_PROFILE_COLUMNS);
   ensureColumns('invite_codes', { role: "TEXT NOT NULL DEFAULT 'carer'" });
