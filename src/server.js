@@ -851,6 +851,312 @@ app.get('/admin/audit', requireManager, (req, res) => {
   res.send(layout({ user: req.user, title: 'Audit', active: '/admin/audit', body }));
 });
 
+// ---- bulk email to staff ---------------------------------------------------
+// Managers email all staff or a filtered subset. Reuses the app's existing SMTP
+// transport (sendMail from reminders.js) — no separate mail client. Each person
+// gets their own individual message (never a shared BCC), so addresses are never
+// exposed to one another. Every send is logged with per-recipient delivery
+// status for the History tab.
+
+// The recipient universe: every active user who has an email address.
+const listEmailAudience = () => db.prepare(`
+  SELECT u.id, u.email, u.role,
+         COALESCE(NULLIF(p.full_name,''), NULLIF(u.name,''), u.email) AS name
+    FROM users u LEFT JOIN profiles p ON p.user_id = u.id
+   WHERE u.is_active = 1 AND u.email IS NOT NULL AND u.email != ''
+   ORDER BY name COLLATE NOCASE, u.email`).all();
+
+// urlencoded repeated fields arrive as an array (or a lone string, or absent).
+const asArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
+
+function resolveEmailRecipients(mode, body) {
+  const all = listEmailAudience();
+  if (mode === 'role') {
+    const roles = new Set(asArray(body.roles).map(String));
+    return all.filter((u) => roles.has(u.role));
+  }
+  if (mode === 'individuals') {
+    const ids = new Set(asArray(body.user_ids).map(Number));
+    return all.filter((u) => ids.has(u.id));
+  }
+  return all; // 'all'
+}
+
+// Minimal branded HTML wrapper for the manager's plain-text message.
+function bulkEmailHtml(text) {
+  const safe = esc(text).replace(/\r\n|\r|\n/g, '<br>');
+  return `<div style="font-family:Segoe UI,Arial,sans-serif;color:#1f2937;max-width:640px;font-size:15px;line-height:1.55">${safe}
+    <p style="color:#9aa3af;font-size:12px;margin-top:26px">Sent via the Sky Home Living staff portal.</p></div>`;
+}
+
+const emailStatusBadge = (s) =>
+  s === 'sent' ? '<span class="badge green">Sent</span>'
+    : s === 'partial_failure' ? '<span class="badge amber">Partial failure</span>'
+      : s === 'failed' ? '<span class="badge red">Failed</span>'
+        : `<span class="badge grey">${esc(s || 'unknown')}</span>`;
+
+app.get('/manager/bulk-email', requireManager, (req, res) => {
+  const audience = listEmailAudience();
+  const templates = db.prepare('SELECT id, name, subject, body FROM email_templates ORDER BY name COLLATE NOCASE').all();
+  const activeTab = req.query.tab === 'history' ? 'history' : 'compose';
+
+  const roleCounts = {};
+  for (const u of audience) roleCounts[u.role] = (roleCounts[u.role] || 0) + 1;
+
+  // Recent sends plus their per-recipient rows (grouped from one IN(...) query).
+  const logs = db.prepare(`
+    SELECT el.*, COALESCE(NULLIF(u.name,''), u.email) AS sent_by_name
+      FROM email_log el LEFT JOIN users u ON u.id = el.sent_by
+     ORDER BY el.sent_at DESC LIMIT 100`).all();
+  const recipientsByLog = {};
+  if (logs.length) {
+    const ph = logs.map(() => '?').join(',');
+    for (const r of db.prepare(`SELECT * FROM email_log_recipients WHERE email_log_id IN (${ph}) ORDER BY id`).all(...logs.map((l) => l.id))) {
+      (recipientsByLog[r.email_log_id] ||= []).push(r);
+    }
+  }
+
+  const flash = req.query.sent
+    ? `<div class="flash ok">Email sent — ${esc(req.query.ok || '0')} delivered${Number(req.query.fail) ? `, ${esc(req.query.fail)} failed (see the delivery detail below)` : ''}.</div>`
+    : req.query.err ? `<div class="flash err">${esc(req.query.err)}</div>` : '';
+
+  const roleBoxes = ROLES.map((r) =>
+    `<label class="cb-row"><input type="checkbox" name="roles" value="${r.value}" class="role-cb"> ${esc(r.label)} <span class="muted small">(${roleCounts[r.value] || 0})</span></label>`).join('');
+  const individualItems = audience.map((u) =>
+    `<label class="cb-row indiv-item" data-search="${esc((u.name + ' ' + u.email).toLowerCase())}"><input type="checkbox" name="user_ids" value="${u.id}" class="indiv-cb"> ${esc(u.name)} <span class="muted small">${esc(u.email)} · ${esc(roleLabel(u.role))}</span></label>`).join('');
+  const tplOptions = templates.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+
+  const compose = `<div id="tab-compose" style="${activeTab === 'compose' ? '' : 'display:none'}">
+    <form id="composeForm" method="post" action="/manager/bulk-email/send">
+      <div class="card" style="margin-bottom:1rem"><div class="card-h">Recipients</div><div class="card-b">
+        <label class="cb-row"><input type="radio" name="mode" value="all" class="mode-radio" checked> <b>All staff</b> <span class="muted small">(${audience.length})</span></label>
+        <label class="cb-row"><input type="radio" name="mode" value="role" class="mode-radio"> <b>Filter by role</b></label>
+        <div id="roleBox" class="mode-box" style="display:none;margin:.1rem 0 .5rem 1.6rem">${roleBoxes}</div>
+        <label class="cb-row"><input type="radio" name="mode" value="individuals" class="mode-radio"> <b>Select individuals</b></label>
+        <div id="individualBox" class="mode-box" style="display:none;margin:.1rem 0 .5rem 1.6rem">
+          <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem;flex-wrap:wrap">
+            <input id="indivSearch" type="text" placeholder="Search name or email…" style="flex:1;min-width:180px;padding:.35rem .5rem;border:1px solid var(--line);border-radius:7px">
+            <button type="button" class="btn ghost sm" id="selAll">Select all</button>
+            <button type="button" class="btn ghost sm" id="selNone">Select none</button>
+          </div>
+          <div style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:.4rem">${individualItems || '<div class="muted small">No staff found.</div>'}</div>
+        </div>
+        <p style="margin:.7rem 0 0">This email will be sent to <b id="recipientCount">0</b> recipient(s), each individually.</p>
+      </div></div>
+
+      <div class="card" style="margin-bottom:1rem"><div class="card-h">Message</div><div class="card-b">
+        <div class="field"><label>Templates</label>
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+            <select id="tplSelect" style="flex:1;min-width:180px;padding:.4rem .5rem;border:1px solid var(--line);border-radius:7px"><option value="">Load a template…</option>${tplOptions}</select>
+            <button type="button" class="btn ghost sm" id="tplDelete">Delete template</button>
+            <button type="button" class="btn ghost sm" id="tplSave">Save as template</button>
+          </div>
+        </div>
+        <div class="field"><label>Subject</label><input id="subjectInput" name="subject" maxlength="200" required></div>
+        <div class="field"><label>Message</label><textarea id="bodyInput" name="body" rows="12" required style="width:100%;font-family:inherit"></textarea></div>
+      </div></div>
+
+      <button type="submit" class="btn" id="sendBtn">Send email…</button>
+    </form>
+  </div>`;
+
+  const historyRows = logs.map((l) => {
+    const recs = recipientsByLog[l.id] || [];
+    const detail = recs.map((r) => `<div style="padding:.2rem 0;border-bottom:1px solid var(--line)">${esc(r.email_address)} — ${r.status === 'sent' ? '<span class="chip green">Sent</span>' : '<span class="chip red">Failed</span>'} ${r.error_message ? `<span class="muted small">${esc(r.error_message)}</span>` : ''}</div>`).join('') || '<div class="muted small">No per-recipient records.</div>';
+    return `<tr class="log-row" onclick="toggleLog(${l.id})" style="cursor:pointer">
+        <td class="small">${new Date(l.sent_at).toLocaleString('en-GB')}</td>
+        <td><b>${esc(l.subject)}</b></td>
+        <td class="small">${esc(l.sent_by_name || 'system')}</td>
+        <td>${l.recipient_count}</td>
+        <td>${emailStatusBadge(l.status)}</td></tr>
+      <tr id="log-detail-${l.id}" style="display:none"><td colspan="5" style="background:var(--panel,#f7f8fa)"><div style="padding:.5rem .3rem"><b class="small">Delivery detail</b>${detail}</div></td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="muted" style="padding:1rem">No bulk emails sent yet.</td></tr>';
+
+  const history = `<div id="tab-history" style="${activeTab === 'history' ? '' : 'display:none'}">
+    <div class="card"><div class="card-b" style="padding:0">
+    <table class="tbl"><thead><tr><th>Date</th><th>Subject</th><th>Sent by</th><th>Recipients</th><th>Status</th></tr></thead>
+    <tbody>${historyRows}</tbody></table></div></div>
+  </div>`;
+
+  const body = `
+  <style>.cb-row{display:block;padding:.18rem 0}.cb-row input{margin-right:.45rem}</style>
+  <div class="page-head"><div><h1>Bulk email</h1><p class="muted">Email all staff or a filtered group — each person receives their own copy</p></div></div>
+  ${flash}
+  ${mailConfigured() ? '' : '<div class="flash info">Email sending is not currently configured. You can prepare messages and templates, but sending is disabled until an administrator adds the SMTP settings.</div>'}
+  <div style="display:flex;gap:.5rem;margin-bottom:1rem">
+    <button type="button" class="btn ${activeTab === 'compose' ? '' : 'ghost'} sm" id="tabBtn-compose" onclick="showTab('compose')">Compose</button>
+    <button type="button" class="btn ${activeTab === 'history' ? '' : 'ghost'} sm" id="tabBtn-history" onclick="showTab('history')">History</button>
+  </div>
+  ${compose}
+  ${history}`;
+
+  const audienceJson = JSON.stringify(audience.map((u) => ({ id: u.id, role: u.role }))).replace(/</g, '\\u003c');
+  const templatesJson = JSON.stringify(templates).replace(/</g, '\\u003c');
+
+  const scripts = `<script>
+(function(){
+  var AUDIENCE = ${audienceJson};
+  var TEMPLATES = {};
+  (${templatesJson}).forEach(function(t){ TEMPLATES[t.id] = t; });
+  function $(id){ return document.getElementById(id); }
+
+  window.showTab = function(name){
+    $('tab-compose').style.display = name === 'compose' ? '' : 'none';
+    $('tab-history').style.display = name === 'history' ? '' : 'none';
+    $('tabBtn-compose').className = 'btn ' + (name === 'compose' ? '' : 'ghost') + ' sm';
+    $('tabBtn-history').className = 'btn ' + (name === 'history' ? '' : 'ghost') + ' sm';
+  };
+  window.toggleLog = function(id){
+    var d = $('log-detail-' + id);
+    if (d) d.style.display = d.style.display === 'none' ? '' : 'none';
+  };
+
+  function currentMode(){ var r = document.querySelector('input[name=mode]:checked'); return r ? r.value : 'all'; }
+  function selectedCount(){
+    var mode = currentMode();
+    if (mode === 'all') return AUDIENCE.length;
+    if (mode === 'role'){
+      var roles = {};
+      document.querySelectorAll('.role-cb:checked').forEach(function(c){ roles[c.value] = 1; });
+      return AUDIENCE.filter(function(u){ return roles[u.role]; }).length;
+    }
+    return document.querySelectorAll('.indiv-cb:checked').length;
+  }
+  function recount(){
+    var n = selectedCount();
+    $('recipientCount').textContent = n;
+    var mode = currentMode();
+    $('roleBox').style.display = mode === 'role' ? '' : 'none';
+    $('individualBox').style.display = mode === 'individuals' ? '' : 'none';
+    $('sendBtn').disabled = n === 0;
+  }
+
+  document.querySelectorAll('.mode-radio, .role-cb').forEach(function(el){ el.addEventListener('change', recount); });
+  $('individualBox').addEventListener('change', function(e){ if (e.target.classList.contains('indiv-cb')) recount(); });
+
+  var search = $('indivSearch');
+  if (search) search.addEventListener('input', function(){
+    var q = search.value.toLowerCase();
+    document.querySelectorAll('.indiv-item').forEach(function(it){
+      it.style.display = it.getAttribute('data-search').indexOf(q) === -1 ? 'none' : '';
+    });
+  });
+  var selAll = $('selAll'), selNone = $('selNone');
+  if (selAll) selAll.addEventListener('click', function(){ document.querySelectorAll('.indiv-cb').forEach(function(c){ c.checked = true; }); recount(); });
+  if (selNone) selNone.addEventListener('click', function(){ document.querySelectorAll('.indiv-cb').forEach(function(c){ c.checked = false; }); recount(); });
+
+  var tplSelect = $('tplSelect');
+  tplSelect.addEventListener('change', function(){
+    var t = TEMPLATES[tplSelect.value];
+    if (t){ $('subjectInput').value = t.subject || ''; $('bodyInput').value = t.body || ''; }
+  });
+  $('tplSave').addEventListener('click', function(){
+    var name = prompt('Save the current subject and message as a reusable template.\\n\\nTemplate name:');
+    if (name === null) return;
+    name = name.trim();
+    if (!name){ alert('Please enter a template name.'); return; }
+    fetch('/manager/email-templates', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, subject: $('subjectInput').value, body: $('bodyInput').value }) })
+      .then(function(r){ return r.json().then(function(j){ return { ok: r.ok, j: j }; }); })
+      .then(function(res){
+        if (!res.ok){ alert(res.j.error || 'Could not save template.'); return; }
+        TEMPLATES[res.j.id] = res.j;
+        var opt = document.createElement('option');
+        opt.value = res.j.id; opt.textContent = res.j.name;
+        tplSelect.appendChild(opt); tplSelect.value = res.j.id;
+      }).catch(function(){ alert('Could not save template.'); });
+  });
+  $('tplDelete').addEventListener('click', function(){
+    var id = tplSelect.value;
+    if (!id){ alert('Choose a template to delete first.'); return; }
+    if (!confirm('Delete the template "' + TEMPLATES[id].name + '"? This cannot be undone.')) return;
+    fetch('/manager/email-templates/' + id, { method: 'DELETE' })
+      .then(function(r){ if (!r.ok) throw 0;
+        delete TEMPLATES[id];
+        var opt = tplSelect.querySelector('option[value="' + id + '"]'); if (opt) opt.remove();
+        tplSelect.value = '';
+      }).catch(function(){ alert('Could not delete template.'); });
+  });
+
+  $('composeForm').addEventListener('submit', function(e){
+    var n = selectedCount();
+    if (n === 0){ e.preventDefault(); return; }
+    if (!confirm('Send this email to ' + n + ' recipient' + (n === 1 ? '' : 's') + '? Each person receives their own individual copy.')) e.preventDefault();
+  });
+
+  recount();
+})();
+</script>`;
+
+  res.send(layout({ user: req.user, title: 'Bulk email', active: '/manager/bulk-email', body, scripts }));
+});
+
+app.post('/manager/bulk-email/send', requireManager, async (req, res) => {
+  const bad = (msg) => res.redirect('/manager/bulk-email?err=' + encodeURIComponent(msg));
+  const subject = String(req.body.subject || '').trim();
+  const bodyText = String(req.body.body || '');
+  const mode = ['all', 'role', 'individuals'].includes(req.body.mode) ? req.body.mode : 'all';
+  if (!subject) return bad('Enter a subject before sending.');
+  if (!bodyText.trim()) return bad('Enter a message before sending.');
+  // Detect an unconfigured environment up front and fail clearly (no silent no-op).
+  if (!mailConfigured()) return bad('Email sending is not currently configured. Ask an administrator to add the SMTP settings before sending.');
+
+  const list = resolveEmailRecipients(mode, req.body);
+  if (!list.length) return bad('No recipients matched your selection.');
+
+  const filter = mode === 'role' ? { type: 'role', roles: asArray(req.body.roles) }
+    : mode === 'individuals' ? { type: 'individuals', user_ids: list.map((u) => u.id) }
+      : { type: 'all' };
+
+  const logId = Number(db.prepare(
+    'INSERT INTO email_log (sent_by, subject, body, recipient_filter, recipient_count, sent_at, status) VALUES (?,?,?,?,?,?,?)'
+  ).run(req.user.id, subject, bodyText, JSON.stringify(filter), list.length, Date.now(), 'sent').lastInsertRowid);
+
+  const html = bulkEmailHtml(bodyText);
+  const insertRec = db.prepare('INSERT INTO email_log_recipients (email_log_id, user_id, email_address, status, error_message) VALUES (?,?,?,?,?)');
+  let ok = 0, fail = 0;
+  for (const r of list) {
+    // Send one message per recipient — never a shared To/BCC — so addresses stay
+    // private and each copy is personal. Failures are tracked, not fatal.
+    try {
+      await sendMail({ to: r.email, subject, text: bodyText, html });
+      insertRec.run(logId, r.id, r.email, 'sent', null);
+      ok++;
+    } catch (e) {
+      insertRec.run(logId, r.id, r.email, 'failed', String((e && e.message) || e).slice(0, 500));
+      fail++;
+    }
+  }
+  const status = fail === 0 ? 'sent' : ok === 0 ? 'failed' : 'partial_failure';
+  db.prepare('UPDATE email_log SET status=? WHERE id=?').run(status, logId);
+  audit(req.user, 'bulk_email', null, `${ok} sent, ${fail} failed · "${subject.slice(0, 80)}"`);
+  res.redirect(`/manager/bulk-email?tab=history&sent=1&ok=${ok}&fail=${fail}`);
+});
+
+// ---- email templates (JSON API used by the compose page) -------------------
+app.get('/manager/email-templates', requireManager, (_req, res) => {
+  res.json(db.prepare('SELECT id, name, subject, body, updated_at FROM email_templates ORDER BY name COLLATE NOCASE').all());
+});
+app.post('/manager/email-templates', requireManager, (req, res) => {
+  const name = String(req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Template name is required.' });
+  const subject = String(req.body.subject || '');
+  const body = String(req.body.body || '');
+  const now = Date.now();
+  const id = Number(db.prepare('INSERT INTO email_templates (name, subject, body, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?)')
+    .run(name, subject, body, req.user.id, now, now).lastInsertRowid);
+  audit(req.user, 'create_email_template', null, name);
+  res.json({ id, name, subject, body });
+});
+app.delete('/manager/email-templates/:id', requireManager, (req, res) => {
+  const id = Number(req.params.id);
+  const t = db.prepare('SELECT name FROM email_templates WHERE id=?').get(id);
+  if (!t) return res.status(404).json({ error: 'Template not found.' });
+  db.prepare('DELETE FROM email_templates WHERE id=?').run(id);
+  audit(req.user, 'delete_email_template', null, t.name);
+  res.json({ ok: true });
+});
+
 // ---- settings / branding ---------------------------------------------------
 const logoUpload = multer({
   storage: multer.diskStorage({

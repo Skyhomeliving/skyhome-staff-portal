@@ -162,6 +162,39 @@ db.exec(`
     expires_at INTEGER NOT NULL,
     used_at INTEGER
   );
+
+  -- Bulk email to staff: reusable message templates ...
+  CREATE TABLE IF NOT EXISTS email_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    created_by INTEGER,                              -- users.id of the author
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0
+  );
+
+  -- ...one row per bulk send (the audit/history record)...
+  CREATE TABLE IF NOT EXISTS email_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sent_by INTEGER,                                 -- users.id of the sender
+    subject TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    recipient_filter TEXT NOT NULL DEFAULT '',       -- JSON: {type:'all'|'role'|'individuals', ...}
+    recipient_count INTEGER NOT NULL DEFAULT 0,
+    sent_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'sent'              -- sent | partial_failure | failed
+  );
+
+  -- ...and one row per recipient of a send, for per-address delivery tracking.
+  CREATE TABLE IF NOT EXISTS email_log_recipients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email_log_id INTEGER NOT NULL REFERENCES email_log(id) ON DELETE CASCADE,
+    user_id INTEGER,
+    email_address TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'sent',             -- sent | failed
+    error_message TEXT                               -- populated only on failure
+  );
 `);
 
 // --- Additive compliance columns on profiles (driving licence, Home Office
@@ -233,6 +266,8 @@ function reconcileSchema() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_emphist_user ON employment_history(user_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_resets_token ON password_resets(token)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_email_log_sent_at ON email_log(sent_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_email_log_recipients_log ON email_log_recipients(email_log_id)');
   // Migrate the legacy 'staff' role to the new 'carer' frontline role.
   db.exec("UPDATE users SET role='carer' WHERE role='staff'");
 }
