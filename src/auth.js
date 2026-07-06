@@ -6,7 +6,7 @@ import { errorPage } from './views.js';
 import { isOversight, isManagerLevel, isAdmin } from './compliance.js';
 
 export const SESSION_COOKIE = 'shl_session';
-const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 180; // 180 days
 // Sliding expiry: a still-valid session is pushed out to a fresh full TTL on
 // use, but at most once an hour so we don't write to the DB on every request.
 const SESSION_REFRESH_AFTER_MS = 1000 * 60 * 60; // 1 hour
