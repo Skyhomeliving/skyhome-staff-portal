@@ -13,7 +13,7 @@ const fmt = (s) => { if (!s) return '—'; const d = new Date(s); return Number.
 const sectionTitle = (doc, t) => { doc.moveDown(0.5).fontSize(11).fillColor(NAVY).text(t).fillColor('#000').moveDown(0.15); };
 const kv = (doc, k, v) => { doc.fontSize(9.5).fillColor('#555').text(`${k}:  `, { continued: true }).fillColor('#111').text(v); };
 
-export function writeSummary(doc, { profile, user, docs, actor, org = 'Sky Home Living Care Ltd' }) {
+export function writeSummary(doc, { profile, user, docs, actor, org = 'Sky Home Living Limited' }) {
   const c = computeCompliance(profile);
   // Header band
   doc.rect(0, 0, doc.page.width, 86).fill(NAVY);
