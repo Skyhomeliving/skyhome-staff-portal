@@ -1,16 +1,25 @@
 // reminders.js — daily compliance-renewal email digest to managers.
-// Sends from info@skyhomeliving.co.uk via SMTP (nodemailer). No-ops cleanly
-// until SMTP env vars are configured, so the app runs fine without email set up.
-import { createRequire } from 'node:module';
-const require = createRequire(import.meta.url);
-const nodemailer = require('nodemailer');
+// Sends from info@skyhomeliving.co.uk via the Resend API (https://resend.com).
+// Switched off raw SMTP: Railway's network can't reach the shared-hosting SMTP
+// server (connections time out), whereas Resend sends over HTTPS. No-ops cleanly
+// until RESEND_API_KEY is configured, so the app runs fine without email set up.
+import { Resend } from 'resend';
 import { db } from './db.js';
 import { computeCompliance } from './compliance.js';
 
-const FROM = process.env.MAIL_FROM || 'info@skyhomeliving.co.uk';
+// Must be an address on the Resend-verified domain (skyhomeliving.co.uk).
+const FROM = 'SkyCare OS <info@skyhomeliving.co.uk>';
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-export const mailConfigured = () => !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+// Email is only usable when the Resend API key is present.
+export const mailConfigured = () => !!process.env.RESEND_API_KEY;
+
+// Lazily-created Resend client (constructed on first send).
+let resendClient = null;
+function resend() {
+  if (!resendClient) resendClient = new Resend(process.env.RESEND_API_KEY);
+  return resendClient;
+}
 
 const meta = {
   get: (k) => db.prepare('SELECT value FROM app_meta WHERE key=?').get(k)?.value,
@@ -29,16 +38,6 @@ export function buildDigest(withinDays = 60) {
   for (const s of staff) for (const a of computeCompliance(s).alerts) if (a.days <= withinDays) items.push({ name: s.full_name || s.email, id: s.id, ...a });
   items.sort((x, y) => x.days - y.days);
   return items;
-}
-
-function transport() {
-  const port = Number(process.env.SMTP_PORT || 587);
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port,
-    secure: port === 465,
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-  });
 }
 
 function buildHtml(items) {
@@ -63,24 +62,28 @@ function buildHtml(items) {
     <p style="color:#999;font-size:12px;margin-top:22px">Automated reminder from the Sky Home Living staff compliance portal. Confidential — contains personal data.</p></div>` };
 }
 
-// Generic transactional send (password reset, etc.) reusing the SMTP transport.
+// Generic transactional send (password reset, bulk email, etc.) via Resend.
+// Resend returns { data, error } instead of throwing on API errors, so we
+// surface a non-null error as an exception to match the callers' try/catch.
 export async function sendMail({ to, subject, html, text }) {
-  if (!mailConfigured()) throw new Error('Email (SMTP) is not configured.');
-  return transport().sendMail({ from: `"Sky Home Living" <${FROM}>`, to, subject, html, text });
+  if (!mailConfigured()) throw new Error('Email is not configured (RESEND_API_KEY is not set).');
+  const { error } = await resend().emails.send({ from: FROM, to, subject, html, text });
+  if (error) throw new Error(`Resend ${error.name}: ${error.message}`);
 }
 
 export async function sendDigest() {
-  if (!mailConfigured()) return { sent: false, reason: 'Email (SMTP) is not configured yet.' };
+  if (!mailConfigured()) return { sent: false, reason: 'Email is not configured yet (RESEND_API_KEY is not set).' };
   const to = recipients();
   if (!to.length) return { sent: false, reason: 'No admin/manager recipients found.' };
   const items = buildDigest(60);
   const { expired, soon, html } = buildHtml(items);
-  await transport().sendMail({
-    from: `"Sky Home Living" <${FROM}>`,
-    to: to.join(','),
+  const { error } = await resend().emails.send({
+    from: FROM,
+    to,
     subject: `Compliance renewals — ${expired} expired, ${soon} due within 30 days`,
     html,
   });
+  if (error) throw new Error(`Resend ${error.name}: ${error.message}`);
   meta.set('last_reminder_date', new Date().toISOString().slice(0, 10));
   meta.set('last_reminder_at', new Date().toISOString());
   return { sent: true, count: items.length, to };

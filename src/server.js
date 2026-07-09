@@ -696,7 +696,7 @@ app.get('/alerts', requireOversight, (req, res) => {
   ${req.query.reminder === 'error' ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#b42318">Could not send: ${esc(req.query.msg || '')}</div></div>` : ''}
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Email reminders ${mailConfigured() ? '<span class="badge green">Active</span>' : '<span class="badge amber">Not configured</span>'}</div>
     <div class="card-b" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
-      <div class="small muted">${mailConfigured() ? `Daily digest to: ${esc(recipients().join(', '))}.${lastSentAt() ? ` Last sent ${new Date(lastSentAt()).toLocaleString('en-GB')}.` : ' Not sent yet.'}` : 'Add the info@skyhomeliving.co.uk SMTP settings to enable automatic daily reminders.'}</div>
+      <div class="small muted">${mailConfigured() ? `Daily digest to: ${esc(recipients().join(', '))}.${lastSentAt() ? ` Last sent ${new Date(lastSentAt()).toLocaleString('en-GB')}.` : ' Not sent yet.'}` : 'Set the RESEND_API_KEY environment variable to enable automatic daily reminders.'}</div>
       <form method="post" action="/admin/send-reminders"><button class="btn sm" ${mailConfigured() ? '' : 'disabled'}>Send reminders now</button></form>
     </div></div>
   <div class="card"><div class="card-b" style="padding:0">
@@ -852,8 +852,8 @@ app.get('/admin/audit', requireManager, (req, res) => {
 });
 
 // ---- bulk email to staff ---------------------------------------------------
-// Managers email all staff or a filtered subset. Reuses the app's existing SMTP
-// transport (sendMail from reminders.js) — no separate mail client. Each person
+// Managers email all staff or a filtered subset. Reuses the app's shared mail
+// sender (sendMail from reminders.js, via Resend) — no separate mail client. Each person
 // gets their own individual message (never a shared BCC), so addresses are never
 // exposed to one another. Every send is logged with per-recipient delivery
 // status for the History tab.
@@ -982,7 +982,7 @@ app.get('/manager/bulk-email', requireManager, (req, res) => {
   <style>.cb-row{display:block;padding:.18rem 0}.cb-row input{margin-right:.45rem}</style>
   <div class="page-head"><div><h1>Bulk email</h1><p class="muted">Email all staff or a filtered group — each person receives their own copy</p></div></div>
   ${flash}
-  ${mailConfigured() ? '' : '<div class="flash info">Email sending is not currently configured. You can prepare messages and templates, but sending is disabled until an administrator adds the SMTP settings.</div>'}
+  ${mailConfigured() ? '' : '<div class="flash info">Email sending is not currently configured. You can prepare messages and templates, but sending is disabled until an administrator sets the RESEND_API_KEY environment variable.</div>'}
   <div style="display:flex;gap:.5rem;margin-bottom:1rem">
     <button type="button" class="btn ${activeTab === 'compose' ? '' : 'ghost'} sm" id="tabBtn-compose" onclick="showTab('compose')">Compose</button>
     <button type="button" class="btn ${activeTab === 'history' ? '' : 'ghost'} sm" id="tabBtn-history" onclick="showTab('history')">History</button>
@@ -1099,7 +1099,7 @@ app.post('/manager/bulk-email/send', requireManager, async (req, res) => {
   if (!subject) return bad('Enter a subject before sending.');
   if (!bodyText.trim()) return bad('Enter a message before sending.');
   // Detect an unconfigured environment up front and fail clearly (no silent no-op).
-  if (!mailConfigured()) return bad('Email sending is not currently configured. Ask an administrator to add the SMTP settings before sending.');
+  if (!mailConfigured()) return bad('Email sending is not currently configured. Ask an administrator to set the RESEND_API_KEY environment variable before sending.');
 
   const list = resolveEmailRecipients(mode, req.body);
   if (!list.length) return bad('No recipients matched your selection.');
