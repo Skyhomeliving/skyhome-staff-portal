@@ -8,7 +8,7 @@ import { db } from './db.js';
 import { computeCompliance } from './compliance.js';
 
 // Must be an address on the Resend-verified domain (skyhomeliving.co.uk).
-const FROM = 'SkyCare OS <info@skyhomeliving.co.uk>';
+const FROM = 'Sky Home Living <info@skyhomeliving.co.uk>';
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // Email is only usable when the Resend API key is present.
