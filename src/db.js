@@ -231,6 +231,13 @@ const NEW_PROFILE_COLUMNS = {
   health_declaration_date: "TEXT NOT NULL DEFAULT ''",
   occupational_health_status: "TEXT NOT NULL DEFAULT ''",
   occupational_health_date: "TEXT NOT NULL DEFAULT ''",
+  // Offer terms captured at the offer-letter stage, reused by the contract so
+  // both documents carry identical figures without re-entry.
+  offer_role_title: "TEXT NOT NULL DEFAULT ''",
+  offer_start_date: "TEXT NOT NULL DEFAULT ''",
+  offer_hourly_rate: "TEXT NOT NULL DEFAULT ''",
+  offer_hours_per_week: "TEXT NOT NULL DEFAULT ''",
+  offer_probation: "TEXT NOT NULL DEFAULT ''",
 };
 
 function ensureColumns(table, columns) {
@@ -250,6 +257,14 @@ function reconcileSchema() {
     must_change_password: 'INTEGER NOT NULL DEFAULT 0',
     // Offboarding: 0 = deactivated (access revoked, sessions killed), 1 = active.
     is_active: 'INTEGER NOT NULL DEFAULT 1',
+    // Two-stage onboarding approval pipeline (offer letter → employment contract).
+    offer_letter_status: "TEXT NOT NULL DEFAULT 'not_started'",        // not_started | issued | accepted
+    employment_contract_status: "TEXT NOT NULL DEFAULT 'not_started'", // not_started | issued | signed
+    offer_letter_issued_at: 'TEXT',
+    employment_contract_issued_at: 'TEXT',
+    offer_letter_pdf: 'BLOB',
+    employment_contract_pdf: 'BLOB',
+    handbook_acknowledged_at: 'TEXT',
   });
   // Confirm the offboarding migration in deploy logs. Runs on every boot; the
   // ALTER above is a no-op once the column exists, so this reflects reality.

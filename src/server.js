@@ -21,6 +21,7 @@ import {
 } from './compliance.js';
 import { seedAdmin, seedDemo } from './seed.js';
 import { streamZip, streamCategoryZip, pdfBuffer, writeSummary } from './export.js';
+import { writeOfferLetter, writeEmploymentContract, writeHandbookAck, DEFAULT_MANAGER } from './onboarding.js';
 import { startScheduler, sendDigest, sendMail, mailConfigured, recipients, lastSentAt } from './reminders.js';
 import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js';
 import { layout, loginPage, forgotPage, resetPage, errorPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, avatarTag, fileKind, fileExt } from './views.js';
@@ -371,6 +372,65 @@ app.get('/staff/:id', requireAuth, (req, res) => {
     ${tile('Mandatory training', p.mandatory_training_expiry ? 'Valid' : (p.mandatory_training_date ? 'Recorded' : ''), p.mandatory_training_expiry ? `Expires ${fmtDate(p.mandatory_training_expiry)}` : '', p.mandatory_training_expiry ? lvlDate(p.mandatory_training_expiry) : 'grey')}
     ${tile('References', p.references_received, '', refLvl)}</div>`;
 
+  // ---- Onboarding approval pipeline (manager-only): offer letter → contract ----
+  let onboardingHtml = '';
+  if (canReview) {
+    const approvedCats = new Set(docs.filter((d) => d.status === 'approved').map((d) => d.category));
+    const reqDBS = approvedCats.has('dbs_certificate');
+    const reqRTW = approvedCats.has('right_to_work') || approvedCats.has('visa_share_code');
+    const reqRef = approvedCats.has('employment_reference');
+    const docsApproved = reqDBS && reqRTW && reqRef;
+    const offerIssued = u.offer_letter_status === 'issued' || u.offer_letter_status === 'accepted';
+    const contractIssued = u.employment_contract_status === 'issued' || u.employment_contract_status === 'signed';
+    const chip = (ok) => ok ? '<span class="chip green">Issued</span>' : '<span class="chip amber">Not yet</span>';
+    const flash = req.query.onboard === 'needdocs' ? '<div class="flash err">Approve the DBS, Right to Work and reference documents before issuing an offer letter.</div>'
+      : req.query.onboard === 'needoffer' ? '<div class="flash err">Issue the offer letter before approving for employment.</div>'
+      : req.query.onboard === 'offer' ? '<div class="flash ok">Offer letter generated and issued.</div>'
+      : req.query.onboard === 'contract' ? '<div class="flash ok">Approved for employment — contract and handbook acknowledgement generated.</div>' : '';
+
+    let step1;
+    if (offerIssued) {
+      step1 = `<div class="doc-sub" style="color:var(--green)">Issued ${u.offer_letter_issued_at ? fmtDate(u.offer_letter_issued_at) : ''}</div>
+        <a class="btn ghost sm" href="/manager/staff/${u.id}/offer-letter/pdf">${miniIcon('download')} Offer letter PDF</a>`;
+    } else if (docsApproved) {
+      step1 = `<p class="muted small" style="margin:.2rem 0 .5rem">All required documents are approved. Confirm the offer terms and generate the formal offer letter.</p>
+        <form method="post" action="/manager/staff/${u.id}/offer-letter"><div class="form-grid">
+          <div class="field"><label>Role title</label><input name="role_title" value="${esc(p.offer_role_title || p.job_title || '')}" required></div>
+          <div class="field"><label>Start date</label><input type="date" name="start_date" value="${esc(p.offer_start_date || p.start_date || '')}"></div>
+          <div class="field"><label>Hourly rate (£)</label><input name="hourly_rate" value="${esc(p.offer_hourly_rate || '')}" placeholder="e.g. 11.44" required></div>
+          <div class="field"><label>Hours per week</label><input name="hours_per_week" value="${esc(p.offer_hours_per_week || '')}" placeholder="e.g. 37.5" required></div>
+          <div class="field"><label>Probationary period</label><input name="probation_period" value="${esc(p.offer_probation || '6 months')}"></div>
+        </div><button class="btn" type="submit">Generate Offer Letter</button></form>`;
+    } else {
+      const missing = [!reqDBS ? 'DBS certificate' : null, !reqRTW ? 'Right to Work' : null, !reqRef ? 'employment reference' : null].filter(Boolean).join(', ');
+      step1 = `<p class="muted small" style="margin:.2rem 0 .5rem">Approve all required documents first — still needed: <b>${esc(missing)}</b>.</p>
+        <button class="btn" disabled title="Approve required documents first">Generate Offer Letter</button>`;
+    }
+
+    let step2;
+    if (contractIssued) {
+      step2 = `<div class="doc-sub" style="color:var(--green)">Issued ${u.employment_contract_issued_at ? fmtDate(u.employment_contract_issued_at) : ''}</div>
+        <a class="btn ghost sm" href="/manager/staff/${u.id}/employment-contract/pdf">${miniIcon('download')} Employment contract</a>
+        <a class="btn ghost sm" href="/manager/staff/${u.id}/staff-handbook/pdf">${miniIcon('download')} Staff handbook acknowledgement</a>`;
+    } else if (offerIssued) {
+      step2 = `<p class="muted small" style="margin:.2rem 0 .5rem">A separate, later approval. It generates the employment contract and the staff handbook acknowledgement together.</p>
+        <form method="post" action="/manager/staff/${u.id}/employment-contract" onsubmit="return confirm('Approve this staff member for employment? This generates and issues their employment contract and staff handbook acknowledgement.')"><button class="btn" type="submit">Approve for Employment</button></form>`;
+    } else {
+      step2 = `<p class="muted small" style="margin:.2rem 0 .5rem">Available once the offer letter has been issued.</p>
+        <button class="btn" disabled title="Issue the offer letter first">Approve for Employment</button>`;
+    }
+
+    onboardingHtml = `<div class="card" style="margin-bottom:1rem"><div class="card-h">Onboarding — offer &amp; contract <span class="muted small" style="font-weight:400">· manager only</span></div>
+      <div class="card-b">${flash}
+        <div style="display:flex;gap:.9rem;align-items:flex-start">
+          <div style="flex:0 0 1.6rem;font-weight:700">1</div>
+          <div style="flex:1"><div style="margin-bottom:.3rem"><b>Step 1 · Offer letter</b> ${chip(offerIssued)}</div>${step1}</div></div>
+        <div style="display:flex;gap:.9rem;align-items:flex-start;margin-top:1rem;border-top:1px solid var(--line-2);padding-top:1rem">
+          <div style="flex:0 0 1.6rem;font-weight:700">2</div>
+          <div style="flex:1"><div style="margin-bottom:.3rem"><b>Step 2 · Employment contract &amp; handbook</b> ${chip(contractIssued)}</div>${step2}</div></div>
+      </div></div>`;
+  }
+
   const body = `
   <div class="hero">
     ${avatarTag(u.id, p.photo_path, p.full_name || u.email, 'lg')}
@@ -394,6 +454,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
   <div class="card" style="margin-bottom:1rem"><div class="card-h"><span>Documents <span class="muted small" style="font-weight:400">· ${docs.length} on file${docs.filter((d) => d.status === 'pending').length ? ` · ${docs.filter((d) => d.status === 'pending').length} pending review` : ''}</span></span>
     ${canEdit ? `<a class="btn ghost sm" href="/staff/${u.id}/edit#documents">Upload</a>` : ''}</div>
     <div class="card-b" style="padding:0">${docs.length ? `<div class="doc-list">${docRowsHtml}</div>` : '<div class="card-b muted">No documents uploaded yet.</div>'}</div></div>
+  ${onboardingHtml}
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Employment history <span class="muted small">CQC Schedule 3</span></div>
     <div class="card-b" style="padding:0">
     <table class="tbl"><thead><tr><th>Employer</th><th>Role</th><th>From</th><th>To</th><th>Care role</th><th>Reason for leaving</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>
@@ -799,6 +860,88 @@ app.post('/manager/staff/:id/reactivate', requireManager, (req, res) => {
   db.prepare('UPDATE users SET is_active=1 WHERE id=?').run(u.id);
   audit(req.user, 'reactivate_staff', u.id, u.email);
   res.redirect(`/staff/${u.id}`);
+});
+
+// ---- onboarding pipeline: offer letter (stage 1) → contract + handbook (stage 2) ----
+// Stage 1 requires the required onboarding documents (DBS, Right to Work, a
+// reference) to be approved. Stage 2 is a distinct, later approval available only
+// once the offer letter has been issued. Both generate branded PDFs stored on the
+// user row; the handbook acknowledgement is regenerated on demand from its template.
+const onboardingDocsApproved = (userId) => {
+  const cats = new Set(db.prepare("SELECT category FROM documents WHERE user_id=? AND status='approved'").all(userId).map((r) => r.category));
+  return cats.has('dbs_certificate') && (cats.has('right_to_work') || cats.has('visa_share_code')) && cats.has('employment_reference');
+};
+const onboardingCtx = (u, p) => ({
+  staff_name: p.full_name || u.name || u.email,
+  role_title: p.offer_role_title || p.job_title || '',
+  start_date: p.offer_start_date || p.start_date || '',
+  hourly_rate: p.offer_hourly_rate || '',
+  hours_per_week: p.offer_hours_per_week || '',
+  probation: p.offer_probation || '6 months',
+  manager_name: DEFAULT_MANAGER,
+});
+
+app.post('/manager/staff/:id/offer-letter', requireManager, async (req, res) => {
+  const u = getUser(req.params.id);
+  if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
+  if (!onboardingDocsApproved(u.id)) return res.redirect(`/staff/${u.id}?onboard=needdocs`);
+  const p = getProfile(u.id);
+  const roleTitle = String(req.body.role_title || p.job_title || '').trim();
+  const startDate = String(req.body.start_date || p.start_date || '').trim();
+  const hourlyRate = String(req.body.hourly_rate || '').trim();
+  const hoursPerWeek = String(req.body.hours_per_week || '').trim();
+  const probation = String(req.body.probation_period || '').trim() || '6 months';
+  db.prepare('UPDATE profiles SET offer_role_title=?, offer_start_date=?, offer_hourly_rate=?, offer_hours_per_week=?, offer_probation=?, updated_at=? WHERE user_id=?')
+    .run(roleTitle, startDate, hourlyRate, hoursPerWeek, probation, Date.now(), u.id);
+  const buf = await pdfBuffer((doc) => writeOfferLetter(doc, onboardingCtx(u, getProfile(u.id))));
+  db.prepare("UPDATE users SET offer_letter_pdf=?, offer_letter_status='issued', offer_letter_issued_at=? WHERE id=?")
+    .run(buf, new Date().toISOString(), u.id);
+  audit(req.user, 'issue_offer_letter', u.id, roleTitle);
+  res.redirect(`/staff/${u.id}?onboard=offer`);
+});
+
+app.get('/manager/staff/:id/offer-letter/pdf', requireManager, (req, res) => {
+  const row = db.prepare('SELECT offer_letter_pdf FROM users WHERE id=?').get(req.params.id);
+  if (!row || !row.offer_letter_pdf) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Not generated', message: 'No offer letter has been generated for this staff member yet.' }));
+  const p = getProfile(req.params.id);
+  const safe = (p.full_name || 'staff').replace(/[^a-z0-9]+/gi, '_');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${safe}_offer_letter.pdf"`);
+  res.end(Buffer.from(row.offer_letter_pdf));
+});
+
+app.post('/manager/staff/:id/employment-contract', requireManager, async (req, res) => {
+  const u = getUser(req.params.id);
+  if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
+  if (u.offer_letter_status !== 'issued' && u.offer_letter_status !== 'accepted') return res.redirect(`/staff/${u.id}?onboard=needoffer`);
+  const buf = await pdfBuffer((doc) => writeEmploymentContract(doc, onboardingCtx(u, getProfile(u.id))));
+  const now = new Date().toISOString();
+  db.prepare("UPDATE users SET employment_contract_pdf=?, employment_contract_status='issued', employment_contract_issued_at=?, handbook_acknowledged_at=? WHERE id=?")
+    .run(buf, now, now, u.id);
+  audit(req.user, 'approve_for_employment', u.id);
+  res.redirect(`/staff/${u.id}?onboard=contract`);
+});
+
+app.get('/manager/staff/:id/employment-contract/pdf', requireManager, (req, res) => {
+  const row = db.prepare('SELECT employment_contract_pdf FROM users WHERE id=?').get(req.params.id);
+  if (!row || !row.employment_contract_pdf) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Not generated', message: 'No employment contract has been generated for this staff member yet.' }));
+  const p = getProfile(req.params.id);
+  const safe = (p.full_name || 'staff').replace(/[^a-z0-9]+/gi, '_');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${safe}_employment_contract.pdf"`);
+  res.end(Buffer.from(row.employment_contract_pdf));
+});
+
+app.get('/manager/staff/:id/staff-handbook/pdf', requireManager, async (req, res) => {
+  const u = getUser(req.params.id);
+  if (!u || (u.employment_contract_status !== 'issued' && u.employment_contract_status !== 'signed'))
+    return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Not available', message: 'The staff handbook acknowledgement is available once the staff member has been approved for employment.' }));
+  const p = getProfile(u.id);
+  const buf = await pdfBuffer((doc) => writeHandbookAck(doc, { staff_name: p.full_name || u.name || u.email, role_title: p.offer_role_title || p.job_title || '' }));
+  const safe = (p.full_name || 'staff').replace(/[^a-z0-9]+/gi, '_');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${safe}_staff_handbook_acknowledgement.pdf"`);
+  res.end(buf);
 });
 
 // ---- invites ---------------------------------------------------------------
