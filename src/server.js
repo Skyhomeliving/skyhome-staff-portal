@@ -347,7 +347,11 @@ app.get('/staff/:id', requireAuth, (req, res) => {
   if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   const p = getProfile(u.id); const docs = listDocs(u.id);
-  const c = computeCompliance(attachEvidenceOne(p, u.id));
+  // Evidence context is loaded once and shared: the status calculation below and
+  // the compliance tiles further down must be reading the same reference count
+  // and the same set of on-disk documents, not two independently-fetched copies.
+  const evidence = attachEvidenceOne(p, u.id);
+  const c = computeCompliance(evidence);
   const emp = listEmployment(u.id); const refs = listReferences(u.id);
   const canEdit = canEditStaff(req.user, u.id);
   const sectNav = PROFILE_SECTIONS.map((s) => `<a href="#${s.id}">${esc(s.title)}</a>`).join('');
@@ -397,7 +401,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
   const low = (s) => (s || '').toLowerCase();
   // Tiles reflect held evidence, not just a status word: a "Clear" DBS with no
   // certificate number and no uploaded certificate is not a green tile.
-  const evidence = attachEvidenceOne(p, u.id);
+  // (`evidence` is loaded once at the top of the handler.)
   const hasDbsEvidence = isFilled(p.dbs_certificate_number) && evidence.document_categories.has('dbs_certificate');
   const hasRtwEvidence = isFilled(p.right_to_work_type) && evidence.document_categories.has('right_to_work');
   const dbsLvl = !hasDbsEvidence ? 'incomplete'

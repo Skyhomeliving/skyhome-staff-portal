@@ -175,6 +175,9 @@ img.av-img{object-fit:cover;background:none}
 .hero .btn.ghost:hover{background:rgba(255,255,255,.2)}
 .hero .badge{background:rgba(255,255,255,.16);color:#fff}
 .hero .badge .dot.green{background:#5fe39b}.hero .badge .dot.amber{background:#ffd166}.hero .badge .dot.red{background:#ff8a7a}
+/* The hero is navy, so every status dot needs a light variant. --incomplete is a
+   dark purple chosen for contrast on white; unlightened it disappears here. */
+.hero .badge .dot.incomplete{background:#d8b4fe}
 
 /* Compliance-at-a-glance tiles */
 .cgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.7rem;margin-bottom:1.1rem}
