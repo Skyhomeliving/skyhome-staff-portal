@@ -5,7 +5,8 @@ const archiver = require('archiver');
 const PDFDocument = require('pdfkit');
 import fs from 'node:fs';
 import path from 'node:path';
-import { PROFILE_SECTIONS, categoryLabel, computeCompliance } from './compliance.js';
+import { PROFILE_SECTIONS, categoryLabel, computeCompliance, REQUIRED_TOTAL } from './compliance.js';
+import { presentCategories } from './evidence.js';
 
 const NAVY = '#0c2a4d';
 const fmt = (s) => { if (!s) return '—'; const d = new Date(s); return Number.isNaN(d.getTime()) ? String(s) : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }); };
@@ -14,7 +15,15 @@ const sectionTitle = (doc, t) => { doc.moveDown(0.5).fontSize(11).fillColor(NAVY
 const kv = (doc, k, v) => { doc.fontSize(9.5).fillColor('#555').text(`${k}:  `, { continued: true }).fillColor('#111').text(v); };
 
 export function writeSummary(doc, { profile, user, docs, actor, org = 'Sky Home Living Limited' }) {
-  const c = computeCompliance(profile);
+  // Evidence context comes from the caller (documents in hand + reference count),
+  // so this regulator-facing PDF reports the same status as the portal. It
+  // previously judged expiry dates only and could print COMPLIANT for a record
+  // holding no evidence at all.
+  const c = computeCompliance({
+    ...profile,
+    references_count: profile.references_count ?? 0,
+    document_categories: presentCategories(docs || []),
+  });
   // Header band
   doc.rect(0, 0, doc.page.width, 86).fill(NAVY);
   doc.fillColor('#fff').fontSize(18).text(org, 50, 26);
@@ -24,12 +33,24 @@ export function writeSummary(doc, { profile, user, docs, actor, org = 'Sky Home 
   doc.fontSize(16).fillColor(NAVY).text(profile.full_name || user.email);
   doc.fontSize(10).fillColor('#444').text(`${profile.job_title || '—'}   ·   ${user.email}`);
   doc.fontSize(9).fillColor('#666').text(`Generated ${new Date().toLocaleString('en-GB')}${actor?.email ? ` by ${actor.email}` : ''}`);
-  const st = c.rag === 'red' ? ['ACTION NEEDED', '#b42318'] : c.rag === 'amber' ? ['ATTENTION', '#9a6700'] : ['COMPLIANT', '#1a7f4b'];
+  const st = c.status === 'incomplete' ? ['INCOMPLETE — EVIDENCE MISSING', '#6b21a8']
+    : c.status === 'expired' ? ['NOT COMPLIANT — EVIDENCE EXPIRED', '#b42318']
+    : c.counts.critical ? ['COMPLIANT — RENEWALS DUE', '#9a6700']
+    : ['COMPLIANT', '#1a7f4b'];
   doc.moveDown(0.4).fontSize(11).fillColor(st[1]).text(`Overall status: ${st[0]}`).fillColor('#000');
+  if (c.missing.length) {
+    doc.fontSize(9).fillColor('#6b21a8')
+      .text(`${c.missing.length} of ${REQUIRED_TOTAL} required items not held: ${c.missing.join(', ')}`).fillColor('#000');
+  }
 
   if (c.alerts.length) {
-    sectionTitle(doc, 'Renewals & alerts');
-    for (const a of c.alerts) doc.fontSize(9.5).fillColor('#111').text(`•  ${a.label} (${a.area}) — ${fmt(a.date)} — ${a.days < 0 ? `expired ${-a.days} days ago` : `${a.days} days left`}`);
+    sectionTitle(doc, 'Renewals & missing evidence');
+    for (const a of c.alerts) {
+      const state = a.level === 'missing' ? 'MISSING — never recorded'
+        : a.days < 0 ? `expired ${-a.days} days ago`
+        : a.days === 0 ? 'expires today' : `${a.days} days left`;
+      doc.fontSize(9.5).fillColor('#111').text(`•  ${a.label} (${a.area}) — ${a.level === 'missing' ? '—' : fmt(a.date)} — ${state}`);
+    }
   }
 
   for (const s of PROFILE_SECTIONS) {

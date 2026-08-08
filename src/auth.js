@@ -185,5 +185,25 @@ export function canViewStaff(user, targetUserId) {
 export function canEditStaff(user, targetUserId) {
   return isManagerLevel(user.role) || user.id === Number(targetUserId);
 }
+
+// Removing or verifying evidence is management-only — never the subject of the
+// record, even on their own file.
+//
+// Staff CONTRIBUTE evidence (upload a document, list a referee, add employment
+// history) as part of self-service onboarding. They must not be able to REMOVE
+// it or mark it verified: a compliance file whose subject can delete an approved
+// DBS certificate, drop a reference, or erase an employment gap is not evidence
+// of anything. Since the compliance engine now derives status from held evidence,
+// self-deletion also silently flips the record's own compliance state.
+//
+// Deliberately management tier (manager/admin) rather than oversight: the
+// coordinator role is read-only by design, and granting it destructive powers
+// would widen the permission model rather than tighten it.
+export const canDeleteEvidence = (user) => isManagerLevel(user.role);
+
+// Only management may record a reference as actually received, or otherwise
+// attest that a check has been completed. Staff may supply referee details.
+export const canVerifyEvidence = (user) => isManagerLevel(user.role);
+
 // Legacy alias — view semantics.
 export const canAccessStaff = canViewStaff;

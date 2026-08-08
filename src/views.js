@@ -15,14 +15,28 @@ export function fmtDate(s) {
   return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
-const RAG_LABEL = { red: 'Action needed', amber: 'Attention', green: 'Compliant', grey: 'No data' };
+// Three compliance states plus the "renewing soon" shade of compliant.
+// 'incomplete' is deliberately its own colour rather than amber — a file with no
+// DBS evidence on it must not read as "nearly fine".
+const RAG_LABEL = {
+  red: 'Expired', incomplete: 'Evidence missing', amber: 'Renewing soon',
+  green: 'Compliant', grey: 'No data',
+};
 export const ragBadge = (rag) =>
   `<span class="badge ${rag}"><span class="dot ${rag}"></span>${RAG_LABEL[rag] || rag}</span>`;
 
 export function levelBadge(level, text) {
-  const map = { expired: 'red', critical: 'red', warning: 'amber', ok: 'green' };
+  const map = { expired: 'red', missing: 'incomplete', critical: 'red', warning: 'amber', ok: 'green' };
   return `<span class="badge ${map[level] || 'grey'}">${esc(text)}</span>`;
 }
+
+// One alert row's status wording. Missing evidence has no date, so it must never
+// be rendered through the "Nd left / expired Nd ago" path.
+export const alertStatusText = (a) =>
+  a.level === 'missing' ? 'Missing — never recorded'
+    : a.days < 0 ? `Expired ${-a.days}d ago`
+    : a.days === 0 ? 'Expires today'
+    : `${a.days}d left`;
 
 const ICONS = {
   dashboard: '<path d="M3 13h8V3H3v10Zm0 8h8v-6H3v6Zm10 0h8V11h-8v10Zm0-18v6h8V3h-8Z"/>',
