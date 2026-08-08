@@ -7,7 +7,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node --experimental-sqlite src/server.js",
-    "init-db": "node src/init-db.js"
+    "init-db": "node src/init-db.js",
+    "test": "node --experimental-sqlite --env-file=test/test.env --test \"test/*.test.js\""
   },
   "engines": {
     "node": ">=22.5"

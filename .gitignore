@@ -2,3 +2,6 @@ node_modules/
 data/
 *.log
 .env
+
+# test scratch database (created by npm test)
+.test-data/

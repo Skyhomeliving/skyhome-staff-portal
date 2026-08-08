@@ -176,11 +176,37 @@ export const EXPIRY_TRACKERS = PROFILE_SECTIONS.flatMap((s) =>
 );
 
 // --- Expiry / alert engine --------------------------------------------------
+// Whole calendar days from today until dateStr; negative once the date has passed,
+// 0 on the day itself. Returns null for blank/unparseable input.
+//
+// Compares LOCAL midnight to LOCAL midnight, deliberately. A date-only string
+// ("2026-08-08") is parsed by JS as midnight *UTC*, so comparing it against the
+// current instant used to mix a date with a time: at 12:00 BST an item expiring
+// today read as 11 hours in the past, floored to "expired 1 day ago". Every
+// renewal therefore reported a day early and every overdue count was inflated
+// by one. Normalising both sides to local midnight removes the time-of-day
+// component entirely, so the answer no longer depends on when it is asked.
+//
+// Math.round (not floor) absorbs DST: local midnights are 23 or 25 hours apart
+// across a clock change, and flooring 29.96 would silently lose a day each spring.
 export function daysUntil(dateStr) {
   if (!dateStr) return null;
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return null;
-  return Math.floor((d.getTime() - Date.now()) / 86400000);
+  const s = String(dateStr).trim();
+  let target = null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (m) {
+    const [y, mo, da] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    const d = new Date(y, mo - 1, da);
+    // Reject impossible dates that JS would silently roll over (2026-02-30 → 2 Mar).
+    if (d.getFullYear() === y && d.getMonth() === mo - 1 && d.getDate() === da) target = d;
+  } else {
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) target = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  }
+  if (!target) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target.getTime() - today.getTime()) / 86400000);
 }
 
 export function levelFor(days) {
@@ -191,23 +217,125 @@ export function levelFor(days) {
   return 'ok';
 }
 
-// Returns { alerts:[{label,area,date,days,level}], counts, rag }
-export function computeCompliance(profile) {
+export const isFilled = (v) => v !== null && v !== undefined && String(v).trim() !== '';
+
+// --- What a complete staff file must contain --------------------------------
+// The single source of truth for "is this record complete?". completeness.js
+// derives its percentage from the same list, so the dashboard headline count and
+// the "Incomplete files" panel are computed from one definition and cannot drift
+// apart (they previously disagreed on the same screen).
+//
+// `references_count` is supplied by the caller (counted from reference_checks),
+// not stored on profiles.
+export const REQUIRED_FIELDS = [
+  { field: 'full_name', label: 'Full name', area: 'Personal details' },
+  { field: 'dbs_certificate_number', label: 'DBS certificate number', area: 'DBS' },
+  { field: 'dbs_issue_date', label: 'DBS issue date', area: 'DBS' },
+  { field: 'right_to_work_type', label: 'Right to Work basis', area: 'Right to Work & immigration' },
+  { field: 'right_to_work_status', label: 'Right to Work confirmed', area: 'Right to Work & immigration',
+    check: (v) => String(v || '').toLowerCase() === 'confirmed' },
+  { field: 'care_certificate_date', label: 'Care Certificate date', area: 'Training & qualifications' },
+  { field: 'references_count', label: 'References (min 2 received)', area: 'References & supervision',
+    check: (v) => Number(v) >= 2 },
+  { field: 'health_declaration_date', label: 'Health declaration', area: 'Health & fitness' },
+  { field: 'last_supervision_date', label: 'Last supervision recorded', area: 'References & supervision' },
+  { field: 'last_appraisal_date', label: 'Last appraisal recorded', area: 'References & supervision' },
+];
+
+// Documents whose FILE must actually exist for the record to count as complete.
+// Deliberately not driven by documents.status: a row marked 'approved' whose file
+// has since been deleted is not evidence. Callers pass `document_categories`
+// already filtered to files verified present on disk (see evidence.js).
+export const REQUIRED_DOCUMENTS = [
+  { category: 'dbs_certificate', label: 'DBS certificate (uploaded)' },
+  { category: 'right_to_work', label: 'Right to Work evidence (uploaded)' },
+];
+
+export const REQUIRED_TOTAL = REQUIRED_FIELDS.length + REQUIRED_DOCUMENTS.length;
+
+// Ordering for the "needs attention" lists: already-unlawful first, then never
+// -provided, then imminent renewals. Missing items carry days:null, so they must
+// never reach a numeric comparison (NaN would scramble the whole sort).
+const LEVEL_RANK = { expired: 0, missing: 1, critical: 2, warning: 3 };
+const compareAlerts = (a, b) => {
+  const r = (LEVEL_RANK[a.level] ?? 9) - (LEVEL_RANK[b.level] ?? 9);
+  if (r !== 0) return r;
+  if (a.days === null || b.days === null) return String(a.label).localeCompare(String(b.label));
+  return a.days - b.days;
+};
+
+// Compliance status for one staff record.
+//
+// `staff` is a profile row plus two pieces of evidence context the profile table
+// does not hold: `references_count` (number) and `document_categories` (Set of
+// categories whose file is present on disk). Both default to "none", so a caller
+// that forgets them sees an under-stated record rather than a falsely clean one.
+//
+// Three states, because "never provided" and "lapsed" mean different things
+// operationally:
+//   incomplete — a required field or document is missing (takes precedence:
+//                you cannot judge currency of evidence you do not hold)
+//   expired    — everything required is present, but a dated item has passed
+//   compliant  — everything present, nothing expired
+//
+// Returns { alerts, counts, missing, status, complete, rag }.
+export function computeCompliance(staff) {
   const alerts = [];
+
+  // 1. Dated items that have expired or are approaching expiry.
   for (const t of EXPIRY_TRACKERS) {
-    const val = profile[t.key];
+    const val = staff[t.key];
     const days = daysUntil(val);
     if (days === null) continue;
     const level = levelFor(days);
     if (level === 'ok') continue;
-    alerts.push({ label: t.label, area: t.area, date: val, days, level });
+    alerts.push({ kind: 'expiry', key: t.key, label: t.label, area: t.area, date: val, days, level });
   }
-  alerts.sort((a, b) => a.days - b.days);
+
+  // 2. Required fields that were never filled in. Previously invisible: a blank
+  //    field yields no date, so it produced no alert and left the record green.
+  const missing = [];
+  for (const r of REQUIRED_FIELDS) {
+    const ok = r.check ? r.check(staff[r.field]) : isFilled(staff[r.field]);
+    if (ok) continue;
+    missing.push(r.label);
+    alerts.push({ kind: 'missing', key: r.field, label: r.label, area: r.area, date: '', days: null, level: 'missing' });
+  }
+
+  // 3. Required documents with no file present.
+  const present = staff.document_categories instanceof Set
+    ? staff.document_categories
+    : new Set(staff.document_categories || []);
+  for (const d of REQUIRED_DOCUMENTS) {
+    if (present.has(d.category)) continue;
+    missing.push(d.label);
+    alerts.push({ kind: 'missing', key: `doc:${d.category}`, label: d.label, area: 'Documents', date: '', days: null, level: 'missing' });
+  }
+
+  alerts.sort(compareAlerts);
   const counts = {
     expired: alerts.filter((a) => a.level === 'expired').length,
     critical: alerts.filter((a) => a.level === 'critical').length,
     warning: alerts.filter((a) => a.level === 'warning').length,
+    missing: missing.length,
   };
-  const rag = counts.expired ? 'red' : counts.critical ? 'amber' : 'green';
-  return { alerts, counts, rag };
+  const status = counts.missing ? 'incomplete' : counts.expired ? 'expired' : 'compliant';
+  // Colour token for the UI. 'incomplete' is its own colour, not amber: a file
+  // with no DBS on it must not read as "nearly fine".
+  const rag = status === 'incomplete' ? 'incomplete'
+    : status === 'expired' ? 'red'
+    : counts.critical ? 'amber' : 'green';
+  return { alerts, counts, missing, status, complete: counts.missing === 0, rag };
+}
+
+// True when this record's Right to Work position needs immediate attention —
+// either the review date has passed or the check was never completed. Surfaced
+// prominently on the record itself, not only in the alerts list: continuing to
+// employ someone without a valid check is an illegal-working risk.
+export function rightToWorkRisk(staff) {
+  const days = daysUntil(staff.right_to_work_expiry);
+  if (days !== null && days < 0) return { level: 'overdue', days: -days };
+  if (!isFilled(staff.right_to_work_type)) return { level: 'no_basis', days: null };
+  if (String(staff.right_to_work_status || '').toLowerCase() !== 'confirmed') return { level: 'unconfirmed', days: null };
+  return null;
 }

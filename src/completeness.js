@@ -1,54 +1,48 @@
 // completeness.js — "file completeness" score for a staff member: how much of the
 // core recruitment/compliance record (CQC Schedule 3) is actually filled in.
-// This is distinct from compliance.js, which scores whether dated items are still
-// IN DATE (RAG by expiry). Here we score whether the record is COMPLETE.
 //
-// Field names match the real schema (profiles table); references are counted from
-// the reference_checks table rather than a (non-existent) profiles column.
+// This no longer keeps its own copy of the requirements. The score is derived
+// from computeCompliance() in compliance.js, so the dashboard's "Fully compliant"
+// headline and this panel's "Incomplete files" list are two views of one
+// calculation. They previously ran as independent engines and contradicted each
+// other on the same screen.
 import { db as defaultDb } from './db.js';
+import { computeCompliance, REQUIRED_TOTAL } from './compliance.js';
+import { attachEvidence } from './evidence.js';
 
-const filled = (v) => v !== null && v !== undefined && String(v).trim() !== '';
-
-const REQUIRED = [
-  { field: 'full_name',               label: 'Full name' },
-  { field: 'dbs_certificate_number',  label: 'DBS certificate number' },
-  { field: 'dbs_issue_date',          label: 'DBS issue date' },
-  { field: 'right_to_work_type',      label: 'Right to Work basis' },
-  { field: 'right_to_work_status',    label: 'Right to Work confirmed', check: (v) => String(v || '').toLowerCase() === 'confirmed' },
-  { field: 'care_certificate_date',   label: 'Care Certificate date' },
-  { field: 'references_count',        label: 'References (min 2 received)', check: (v) => Number(v) >= 2 },
-  { field: 'health_declaration_date', label: 'Health declaration' },
-  { field: 'last_supervision_date',   label: 'Last supervision recorded' },
-  { field: 'last_appraisal_date',     label: 'Last appraisal recorded' },
-];
-
+// `staff` must already carry evidence context (references_count,
+// document_categories) — see evidence.js.
 export function scoreStaff(staff) {
-  const missing = [];
-  let passed = 0;
-  for (const { field, label, check } of REQUIRED) {
-    const val = staff[field];
-    const ok = check ? check(val) : filled(val);
-    if (ok) passed++; else missing.push(label);
-  }
-  const pct = Math.round((passed / REQUIRED.length) * 100);
-  const rag = pct === 100 ? 'green' : pct >= 75 ? 'amber' : 'red';
-  return { id: staff.id, name: staff.full_name || staff.email || 'Unknown', pct, rag, missing };
+  const c = computeCompliance(staff);
+  const passed = REQUIRED_TOTAL - c.missing.length;
+  const pct = Math.round((passed / REQUIRED_TOTAL) * 100);
+  return {
+    id: staff.id,
+    name: staff.full_name || staff.email || 'Unknown',
+    pct,
+    // Colour tracks the compliance status so the % chip and the status badge
+    // always agree: anything missing is 'incomplete', never amber-as-nearly-fine.
+    rag: c.status === 'compliant' ? 'green' : c.status === 'expired' ? 'red' : 'incomplete',
+    missing: c.missing,
+    status: c.status,
+    complete: c.complete,
+  };
 }
 
-// Scores every non-admin staff member. Selects only the needed columns (avoids the
-// users.id / profiles.id name collision) plus a count of received references.
+// Scores every active non-admin staff member. Selects the columns the requirement
+// list needs (avoiding the users.id / profiles.id collision), then attaches
+// reference counts and on-disk document categories in two batched queries.
 export function scoreAllStaff(db = defaultDb) {
   const rows = db.prepare(`
     SELECT u.id AS id, u.email AS email,
       p.full_name, p.dbs_certificate_number, p.dbs_issue_date,
-      p.right_to_work_type, p.right_to_work_status, p.care_certificate_date,
-      p.health_declaration_date, p.last_supervision_date, p.last_appraisal_date,
-      (SELECT COUNT(*) FROM reference_checks r
-         WHERE r.user_id = u.id AND r.status = 'received') AS references_count
+      p.right_to_work_type, p.right_to_work_status, p.right_to_work_expiry,
+      p.care_certificate_date, p.health_declaration_date,
+      p.last_supervision_date, p.last_appraisal_date
     FROM users u
     LEFT JOIN profiles p ON p.user_id = u.id
     WHERE u.role != 'admin' AND u.is_active = 1
     ORDER BY p.full_name, u.email
   `).all();
-  return rows.map(scoreStaff);
+  return attachEvidence(rows, db).map(scoreStaff);
 }

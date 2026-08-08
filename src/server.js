@@ -11,20 +11,21 @@ import { db, UPLOADS_DIR, PHOTOS_DIR } from './db.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession, setSessionCookie,
   attachUser, requireAuth, requireRole, requireOversight, requireManager, requireAdmin,
-  canAccessStaff, canEditStaff, audit, SESSION_COOKIE,
+  canAccessStaff, canEditStaff, canDeleteEvidence, canVerifyEvidence, audit, SESSION_COOKIE,
   loginLockRemaining, registerLoginFailure, registerLoginSuccess,
   createPasswordReset, getValidReset, consumePasswordReset,
 } from './auth.js';
 import {
   PROFILE_SECTIONS, PROFILE_KEYS, isSelfEditableKey, DOCUMENT_CATEGORIES, categoryLabel, computeCompliance, daysUntil,
-  ROLES, isFrontline, isOversight, isManagerLevel,
+  ROLES, isFrontline, isOversight, isManagerLevel, REQUIRED_TOTAL, rightToWorkRisk, isFilled,
 } from './compliance.js';
+import { attachEvidence, attachEvidenceOne, presentCategories, fileOnDisk } from './evidence.js';
 import { seedAdmin, seedDemo } from './seed.js';
 import { streamZip, streamCategoryZip, pdfBuffer, writeSummary } from './export.js';
 import { writeOfferLetter, writeEmploymentContract, writeHandbookAck, DEFAULT_MANAGER } from './onboarding.js';
 import { startScheduler, sendDigest, sendMail, mailConfigured, recipients, lastSentAt } from './reminders.js';
 import { getBranding, BRAND_DIR, brandMeta, customLogoPath } from './branding.js';
-import { layout, loginPage, forgotPage, resetPage, errorPage, esc, fmtDate, ragBadge, levelBadge, initials, roleLabel, icon, miniIcon, avatarClass, avatarTag, fileKind, fileExt } from './views.js';
+import { layout, loginPage, forgotPage, resetPage, errorPage, esc, fmtDate, ragBadge, levelBadge, alertStatusText, initials, roleLabel, icon, miniIcon, avatarClass, avatarTag, fileKind, fileExt } from './views.js';
 import { securityMiddleware } from './security.js';
 import { startBackupScheduler } from './backup.js';
 import { scoreAllStaff } from './completeness.js';
@@ -188,34 +189,44 @@ app.post('/register', (req, res) => {
 // ---- dashboard -------------------------------------------------------------
 app.get('/', requireAuth, (req, res) => {
   if (isFrontline(req.user.role)) return res.redirect(`/staff/${req.user.id}`);
-  const staff = listStaff();
+  // One pass drives every figure on this page. The headline count and the
+  // "Incomplete files" panel below it are derived from the same rows, so they
+  // cannot disagree the way two independent engines previously did.
+  const staff = attachEvidence(listStaff());
   const rows = staff.map((s) => ({ ...s, c: computeCompliance(s) }));
-  const tot = { red: 0, amber: 0, green: 0, expired: 0, critical: 0 };
-  for (const r of rows) { tot[r.c.rag]++; tot.expired += r.c.counts.expired; tot.critical += r.c.counts.critical; }
-  const attention = rows.filter((r) => r.c.rag !== 'green')
-    .sort((a, b) => (b.c.counts.expired - a.c.counts.expired) || (b.c.counts.critical - a.c.counts.critical));
-  const incomplete = scoreAllStaff().filter((s) => s.pct < 100).sort((a, b) => a.pct - b.pct);
+  const tot = { compliant: 0, incomplete: 0, expired: 0, renewing: 0, criticalItems: 0 };
+  for (const r of rows) {
+    tot[r.c.status]++;
+    if (r.c.status === 'compliant' && r.c.counts.critical) tot.renewing++;
+    tot.criticalItems += r.c.counts.critical;
+  }
+  const attention = rows.filter((r) => r.c.status !== 'compliant')
+    .sort((a, b) => (b.c.counts.expired - a.c.counts.expired) || (b.c.counts.missing - a.c.counts.missing));
+  const incomplete = rows.filter((r) => !r.c.complete)
+    .map((r) => ({ id: r.id, name: r.full_name || r.email, missing: r.c.missing,
+                   pct: Math.round(((REQUIRED_TOTAL - r.c.missing.length) / REQUIRED_TOTAL) * 100) }))
+    .sort((a, b) => a.pct - b.pct);
 
   const body = `
   <div class="page-head"><div><h1>Compliance dashboard</h1>
     <p class="muted">${staff.length} staff · live view of DBS, Right to Work, training and renewals</p></div></div>
   <div class="grid cols-4" style="margin-bottom:1.2rem">
     <div class="stat"><div class="n">${staff.length}</div><div class="l">Staff on file</div></div>
-    <div class="stat red"><div class="n">${tot.red}</div><div class="l">Action needed</div></div>
-    <div class="stat amber"><div class="n">${tot.amber}</div><div class="l">Renewing soon</div></div>
-    <div class="stat green"><div class="n">${tot.green}</div><div class="l">Fully compliant</div></div>
+    <div class="stat red"><div class="n">${tot.expired}</div><div class="l">Expired evidence</div></div>
+    <div class="stat incomplete"><div class="n">${tot.incomplete}</div><div class="l">Evidence missing</div></div>
+    <div class="stat green"><div class="n">${tot.compliant}</div><div class="l">Fully compliant${tot.renewing ? ` <span class="muted">· ${tot.renewing} renewing soon</span>` : ''}</div></div>
   </div>
   <div class="card"><div class="card-h">Needs attention
     <a class="btn ghost sm" href="/alerts">View all alerts</a></div>
     <div class="card-b" style="padding:0">
-    ${attention.length ? `<table class="tbl"><thead><tr><th>Staff</th><th>Role</th><th>Status</th><th>Soonest issue</th></tr></thead><tbody>
+    ${attention.length ? `<table class="tbl"><thead><tr><th>Staff</th><th>Role</th><th>Status</th><th>Most urgent issue</th></tr></thead><tbody>
       ${attention.slice(0, 12).map((r) => {
         const a = r.c.alerts[0];
         return `<tr onclick="location='/staff/${r.id}'" style="cursor:pointer">
           <td><b>${esc(r.full_name || r.email)}</b></td>
           <td>${esc(r.job_title || roleLabel(r.role))}</td>
           <td>${ragBadge(r.c.rag)}</td>
-          <td>${a ? `${esc(a.label)} — ${a.days < 0 ? `expired ${-a.days}d ago` : `in ${a.days}d`}` : '—'}</td></tr>`;
+          <td>${a ? `${esc(a.label)} — ${esc(alertStatusText(a).toLowerCase())}` : '—'}</td></tr>`;
       }).join('')}
     </tbody></table>` : `<div class="card-b muted">Everyone is compliant. 🎉</div>`}
     </div></div>
@@ -224,7 +235,7 @@ app.get('/', requireAuth, (req, res) => {
     <div class="card-b" style="padding:0">
     ${incomplete.length ? `<table class="tbl"><thead><tr><th>Staff</th><th>Complete</th><th>Still needed</th></tr></thead><tbody>
       ${incomplete.slice(0, 12).map((s) => `<tr onclick="location='/staff/${s.id}'" style="cursor:pointer">
-        <td><b>${esc(s.name)}</b></td><td><span class="chip ${s.rag}">${s.pct}%</span></td>
+        <td><b>${esc(s.name)}</b></td><td><span class="chip incomplete">${s.pct}%</span></td>
         <td class="muted small">${esc(s.missing.join(', '))}</td></tr>`).join('')}
     </tbody></table>` : `<div class="card-b muted">Every staff file is complete. 🎉</div>`}
     </div></div>`;
@@ -235,17 +246,29 @@ app.get('/', requireAuth, (req, res) => {
 app.get('/staff', requireOversight, (req, res) => {
   const q = String(req.query.q || '').toLowerCase();
   const filter = String(req.query.filter || 'all');
-  let all = listStaff().map((s) => ({ ...s, c: computeCompliance(s), ndocs: db.prepare('SELECT COUNT(*) n FROM documents WHERE user_id=?').get(s.id).n }));
-  const comp = new Map(scoreAllStaff().map((s) => [s.id, s]));
+  // Document counts come from one grouped query rather than a lookup per row.
+  const docTotals = new Map(db.prepare('SELECT user_id, COUNT(*) n FROM documents GROUP BY user_id').all().map((r) => [r.user_id, r.n]));
+  let all = attachEvidence(listStaff()).map((s) => ({ ...s, c: computeCompliance(s), ndocs: docTotals.get(s.id) || 0 }));
   if (q) all = all.filter((r) => `${r.full_name} ${r.email} ${r.job_title}`.toLowerCase().includes(q));
-  const counts = { all: all.length, red: all.filter((r) => r.c.rag === 'red').length, amber: all.filter((r) => r.c.rag === 'amber').length, green: all.filter((r) => r.c.rag === 'green').length };
-  const rows = filter === 'all' ? all : all.filter((r) => r.c.rag === filter);
+  const counts = {
+    all: all.length,
+    expired: all.filter((r) => r.c.status === 'expired').length,
+    incomplete: all.filter((r) => r.c.status === 'incomplete').length,
+    compliant: all.filter((r) => r.c.status === 'compliant').length,
+  };
+  const rows = filter === 'all' ? all : all.filter((r) => r.c.status === filter);
   const qs = (f) => `?filter=${f}${q ? `&q=${encodeURIComponent(req.query.q)}` : ''}`;
   const pill = (f, label, n) => `<a class="${filter === f ? 'on' : ''}" href="/staff${qs(f)}">${label}<span class="c">${n}</span></a>`;
   const chip = (label, lvl) => `<span class="chip ${lvl}">${esc(label)}</span>`;
   const dbsChip = (r) => { const s = (r.dbs_status || '').toLowerCase(); return r.dbs_status ? chip('DBS', s.includes('clear') ? 'green' : s.includes('pend') ? 'amber' : 'red') : ''; };
   const rtwChip = (r) => { const s = (r.right_to_work_status || '').toLowerCase(); return r.right_to_work_status ? chip('RTW', s.includes('confirm') ? 'green' : s.includes('pend') ? 'amber' : 'red') : ''; };
-  const fileChip = (r) => { const fc = comp.get(r.id); if (!fc) return '—'; const t = fc.missing.length ? `Missing: ${fc.missing.join(', ')}` : 'Complete'; return `<span class="chip ${fc.rag}" title="${esc(t)}">${fc.pct}%</span>`; };
+  // File-completeness chip, derived from the same computeCompliance() result as
+  // the status badge in the last column — they can never report different things.
+  const fileChip = (r) => {
+    const pct = Math.round(((REQUIRED_TOTAL - r.c.missing.length) / REQUIRED_TOTAL) * 100);
+    const t = r.c.missing.length ? `Missing: ${r.c.missing.join(', ')}` : 'Complete';
+    return `<span class="chip ${r.c.complete ? 'green' : 'incomplete'}" title="${esc(t)}">${pct}%</span>`;
+  };
 
   // Bulk export by document type (manager-only): one ZIP of a single category
   // across all staff. Shows how many documents exist per type.
@@ -281,14 +304,14 @@ app.get('/staff', requireOversight, (req, res) => {
     <a class="btn" href="/admin/invites">${icon('invite')} Invite staff</a></div>
   <form method="get" style="margin-bottom:.8rem"><input type="hidden" name="filter" value="${esc(filter)}">
     <input name="q" value="${esc(req.query.q || '')}" placeholder="Search name, email or job title…" style="width:100%;max-width:440px;padding:.6rem .8rem;border:1px solid var(--line);border-radius:9px;background:#fff"></form>
-  <div class="filters">${pill('all', 'All', counts.all)}${pill('red', 'Action needed', counts.red)}${pill('amber', 'Renewing soon', counts.amber)}${pill('green', 'Compliant', counts.green)}</div>
+  <div class="filters">${pill('all', 'All', counts.all)}${pill('expired', 'Expired', counts.expired)}${pill('incomplete', 'Evidence missing', counts.incomplete)}${pill('compliant', 'Compliant', counts.compliant)}</div>
   <div class="card"><div class="card-b" style="padding:0">
   <table class="tbl"><thead><tr><th>Name</th><th>Job title</th><th>Compliance</th><th>File</th><th>Docs</th><th>Status</th></tr></thead><tbody>
   ${rows.map((r) => `<tr onclick="location='/staff/${r.id}'" style="cursor:pointer">
     <td><div style="display:flex;align-items:center;gap:.65rem">${avatarTag(r.id, r.photo_path, r.full_name || r.email, 'sm')}
       <div><b>${esc(r.full_name || '—')}</b><div class="muted small">${esc(r.email)}</div></div></div></td>
     <td>${esc(r.job_title || '—')}${r.is_sponsored ? '<div style="margin-top:.2rem"><span class="chip">Sponsored</span></div>' : ''}</td>
-    <td><div class="chips">${dbsChip(r)}${rtwChip(r)}${r.c.counts.expired ? chip(`${r.c.counts.expired} expired`, 'red') : ''}${r.c.counts.critical ? chip(`${r.c.counts.critical} due soon`, 'amber') : ''}${!r.c.counts.expired && !r.c.counts.critical && r.c.rag === 'green' ? chip('Up to date', 'green') : ''}</div></td>
+    <td><div class="chips">${dbsChip(r)}${rtwChip(r)}${r.c.counts.missing ? chip(`${r.c.counts.missing} missing`, 'incomplete') : ''}${r.c.counts.expired ? chip(`${r.c.counts.expired} expired`, 'red') : ''}${r.c.counts.critical ? chip(`${r.c.counts.critical} due soon`, 'amber') : ''}${r.c.status === 'compliant' && !r.c.counts.critical ? chip('Up to date', 'green') : ''}</div></td>
     <td>${fileChip(r)}</td>
     <td>${r.ndocs}</td>
     <td>${ragBadge(r.c.rag)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted" style="padding:1rem">No staff match.</td></tr>'}
@@ -323,7 +346,12 @@ function renderEditField(f, val) {
 app.get('/staff/:id', requireAuth, (req, res) => {
   if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
   const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
-  const p = getProfile(u.id); const c = computeCompliance(p); const docs = listDocs(u.id);
+  const p = getProfile(u.id); const docs = listDocs(u.id);
+  // Evidence context is loaded once and shared: the status calculation below and
+  // the compliance tiles further down must be reading the same reference count
+  // and the same set of on-disk documents, not two independently-fetched copies.
+  const evidence = attachEvidenceOne(p, u.id);
+  const c = computeCompliance(evidence);
   const emp = listEmployment(u.id); const refs = listReferences(u.id);
   const canEdit = canEditStaff(req.user, u.id);
   const sectNav = PROFILE_SECTIONS.map((s) => `<a href="#${s.id}">${esc(s.title)}</a>`).join('');
@@ -334,8 +362,14 @@ app.get('/staff/:id', requireAuth, (req, res) => {
       </div></div></div>`).join('');
 
   const canReview = isManagerLevel(req.user.role);
+  const canRemove = canDeleteEvidence(req.user);
   const docStatusChip = (s) => s === 'approved' ? '<span class="chip green">Approved</span>'
     : s === 'rejected' ? '<span class="chip red">Rejected</span>' : '<span class="chip amber">Pending review</span>';
+  // Documents are listed newest-first, so any earlier upload in the same category
+  // has been superseded by a later one. Computed at render time — the older file
+  // is kept on record rather than deleted, which is what an audit trail needs.
+  const newestPerCategory = new Map();
+  for (const d of docs) if (!newestPerCategory.has(d.category)) newestPerCategory.set(d.category, d.id);
   const docRowsHtml = docs.map((d) => {
     const kind = fileKind(d.file_path || d.mime_type);
     const dd = d.expiry_date ? daysUntil(d.expiry_date) : null;
@@ -346,36 +380,80 @@ app.get('/staff/:id', requireAuth, (req, res) => {
       reviewLine = `<div class="doc-sub" style="color:var(--green)">Approved by ${esc(d.reviewed_by_email)}${reviewedAt ? ` · ${reviewedAt}` : ''}</div>`;
     else if (d.status === 'rejected')
       reviewLine = `<div class="doc-sub" style="color:var(--red)">Rejected${d.reviewed_by_email ? ` by ${esc(d.reviewed_by_email)}` : ''}${reviewedAt ? ` · ${reviewedAt}` : ''}${d.review_note ? ` — ${esc(d.review_note)}` : ''}</div>`;
-    return `<div class="doc-row">
+    const superseded = newestPerCategory.get(d.category) !== d.id;
+    const supersededLine = superseded
+      ? '<div class="doc-sub muted">Superseded by a newer upload in this category · kept for the audit trail</div>' : '';
+    return `<div class="doc-row"${superseded ? ' style="opacity:.62"' : ''}>
       <div class="fileicon ${kind}">${fileExt(d.file_path)}</div>
-      <div class="doc-meta"><div class="doc-title">${esc(d.title || categoryLabel(d.category))} ${docStatusChip(d.status)}</div>
-        <div class="doc-sub">${esc(categoryLabel(d.category))} · uploaded ${fmtDate(new Date(d.uploaded_at).toISOString())}${d.expiry_date ? ` · <span class="${expCls}">expires ${fmtDate(d.expiry_date)}</span>` : ''}</div>${reviewLine}</div>
+      <div class="doc-meta"><div class="doc-title">${esc(d.title || categoryLabel(d.category))} ${docStatusChip(d.status)}${superseded ? ' <span class="chip grey">Superseded</span>' : ''}</div>
+        <div class="doc-sub">${esc(categoryLabel(d.category))} · uploaded ${fmtDate(new Date(d.uploaded_at).toISOString())}${d.expiry_date ? ` · <span class="${expCls}">expires ${fmtDate(d.expiry_date)}</span>` : ''}</div>${reviewLine}${supersededLine}</div>
       <div class="doc-actions">
         <a class="iconbtn" href="/documents/${d.id}" target="_blank" rel="noopener">${miniIcon('eye')} View</a>
         <a class="iconbtn" href="/documents/${d.id}?dl=1">${miniIcon('download')} Download</a>
+        ${canEdit && !superseded ? `<a class="iconbtn" href="/staff/${u.id}/edit?replace=${encodeURIComponent(d.category)}#documents" title="Upload a newer version of this document">${miniIcon('download')} Replace</a>` : ''}
         ${canReview && d.status !== 'approved' ? `<form method="post" action="/documents/${d.id}/approve" style="display:inline"><button class="iconbtn" type="submit" title="Approve this document">✓ Approve</button></form>` : ''}
         ${canReview && d.status !== 'rejected' ? `<form method="post" action="/documents/${d.id}/reject" style="display:inline" onsubmit="var r=prompt('Reason for rejecting (optional):','');if(r===null)return false;this.note.value=r;return true;"><input type="hidden" name="note"><button class="iconbtn danger" type="submit" title="Reject this document">Reject</button></form>` : ''}
-        ${canEdit ? `<form method="post" action="/documents/${d.id}/delete" style="display:inline" onsubmit="return confirm('Delete this document?')"><button class="iconbtn danger" type="submit" title="Delete">${miniIcon('trash')}</button></form>` : ''}
+        ${canRemove ? `<form method="post" action="/documents/${d.id}/delete" style="display:inline" onsubmit="return confirm('Permanently delete this document? This removes the file and may change the staff member\\'s compliance status.')"><button class="iconbtn danger" type="submit" title="Delete">${miniIcon('trash')}</button></form>` : ''}
       </div></div>`;
   }).join('');
   const lvlDate = (s) => { const dd = daysUntil(s); return dd == null ? 'grey' : dd < 0 ? 'red' : dd <= 30 ? 'amber' : 'green'; };
   const tile = (lbl, val, sub, lvl) => `<div class="ctile ${lvl}"><div class="lbl">${esc(lbl)}</div><div class="val">${esc(val || 'Not recorded')}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</div>`;
   const low = (s) => (s || '').toLowerCase();
-  const dbsLvl = p.dbs_expiry ? lvlDate(p.dbs_expiry) : (low(p.dbs_status).includes('clear') ? 'green' : low(p.dbs_status).includes('pend') ? 'amber' : 'grey');
-  const rtwLvl = p.right_to_work_expiry ? lvlDate(p.right_to_work_expiry) : (low(p.right_to_work_status).includes('confirm') ? 'green' : low(p.right_to_work_status).includes('pend') ? 'amber' : 'grey');
-  const ccLvl = low(p.care_certificate_status).includes('complet') ? 'green' : low(p.care_certificate_status).includes('progress') ? 'amber' : 'grey';
-  const refLvl = low(p.references_received) === 'yes' ? 'green' : low(p.references_received) === 'partial' ? 'amber' : 'grey';
+  // Tiles reflect held evidence, not just a status word: a "Clear" DBS with no
+  // certificate number and no uploaded certificate is not a green tile.
+  // (`evidence` is loaded once at the top of the handler.)
+  const hasDbsEvidence = isFilled(p.dbs_certificate_number) && evidence.document_categories.has('dbs_certificate');
+  const hasRtwEvidence = isFilled(p.right_to_work_type) && evidence.document_categories.has('right_to_work');
+  const dbsLvl = !hasDbsEvidence ? 'incomplete'
+    : p.dbs_expiry ? lvlDate(p.dbs_expiry)
+    : (low(p.dbs_status).includes('clear') ? 'green' : low(p.dbs_status).includes('pend') ? 'amber' : 'grey');
+  const rtwLvl = !hasRtwEvidence ? 'incomplete'
+    : p.right_to_work_expiry ? lvlDate(p.right_to_work_expiry)
+    : (low(p.right_to_work_status).includes('confirm') ? 'green' : low(p.right_to_work_status).includes('pend') ? 'amber' : 'grey');
+  const ccLvl = isFilled(p.care_certificate_date) && low(p.care_certificate_status).includes('complet') ? 'green'
+    : low(p.care_certificate_status).includes('progress') ? 'amber' : 'incomplete';
+  const refLvl = evidence.references_count >= 2 ? 'green' : evidence.references_count === 1 ? 'amber' : 'incomplete';
+  // The overdue magnitude belongs on the tile itself — "664 days overdue" is the
+  // fact a manager needs, and it should not require scrolling to the alerts table.
+  const rtwDays = daysUntil(p.right_to_work_expiry);
+  const rtwSub = rtwDays !== null && rtwDays < 0 ? `Review ${-rtwDays} days OVERDUE`
+    : p.right_to_work_expiry ? `Review ${fmtDate(p.right_to_work_expiry)}`
+    : (p.is_sponsored ? 'Sponsored worker' : 'No review date recorded');
   const tilesHtml = `<div class="cgrid">
-    ${tile('DBS', p.dbs_status, p.dbs_expiry ? `Renews ${fmtDate(p.dbs_expiry)}` : '', dbsLvl)}
-    ${tile('Right to Work', p.right_to_work_status, p.right_to_work_expiry ? `Review ${fmtDate(p.right_to_work_expiry)}` : (p.is_sponsored ? 'Sponsored worker' : ''), rtwLvl)}
+    ${tile('DBS', p.dbs_status, hasDbsEvidence ? (p.dbs_expiry ? `Renews ${fmtDate(p.dbs_expiry)}` : '') : 'Certificate not on file', dbsLvl)}
+    ${tile('Right to Work', p.right_to_work_status, rtwSub, rtwLvl)}
     ${tile('Care Certificate', p.care_certificate_status, p.care_certificate_date ? fmtDate(p.care_certificate_date) : '', ccLvl)}
     ${tile('Mandatory training', p.mandatory_training_expiry ? 'Valid' : (p.mandatory_training_date ? 'Recorded' : ''), p.mandatory_training_expiry ? `Expires ${fmtDate(p.mandatory_training_expiry)}` : '', p.mandatory_training_expiry ? lvlDate(p.mandatory_training_expiry) : 'grey')}
-    ${tile('References', p.references_received, '', refLvl)}</div>`;
+    ${tile('References', p.references_received, `${evidence.references_count} received`, refLvl)}</div>`;
+
+  // ---- Right to Work risk banner (F-05) -------------------------------------
+  // An overdue or never-completed RTW check is an illegal-working risk, so it is
+  // stated in full on the record rather than living only in the alerts list.
+  // Managers see the regulatory framing; the staff member sees a plain prompt to
+  // contact their manager — same trigger, wording matched to who is reading.
+  const rtwRisk = rightToWorkRisk(p);
+  let rtwBanner = '';
+  if (rtwRisk) {
+    const forManager = isOversight(req.user.role);
+    const warnIcon = '<svg class="rb-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 1 21h22L12 2Zm1 14h-2v2h2v-2Zm0-6h-2v4h2v-4Z"/></svg>';
+    const headline = rtwRisk.level === 'overdue'
+      ? `Right to Work review is ${rtwRisk.days} day${rtwRisk.days === 1 ? '' : 's'} overdue`
+      : rtwRisk.level === 'no_basis' ? 'No Right to Work basis recorded'
+      : 'Right to Work has not been confirmed';
+    const detail = forManager
+      ? `Continuing to employ this person without a valid Right to Work check is an illegal-working risk and may expose Sky Home Living Ltd to a Home Office civil penalty. Re-verify before their next shift and record the outcome. <a href="/staff/${u.id}/edit#rtw">Update Right to Work</a>`
+      : 'Please contact your manager so your Right to Work check can be brought up to date.';
+    rtwBanner = `<div class="riskbanner${forManager ? '' : ' soft'}" role="alert">${warnIcon}
+      <div><div class="rb-title">${esc(headline)}</div><div class="rb-body">${detail}</div></div></div>`;
+  }
 
   // ---- Onboarding approval pipeline (manager-only): offer letter → contract ----
   let onboardingHtml = '';
   if (canReview) {
-    const approvedCats = new Set(docs.filter((d) => d.status === 'approved').map((d) => d.category));
+    // A document gates the onboarding pipeline only if its file is actually on
+    // disk. An 'approved' row whose file has since been deleted is not evidence —
+    // same defect class as scoring a record with no evidence "Compliant".
+    const approvedCats = new Set(docs.filter((d) => d.status === 'approved' && fileOnDisk(d.file_path)).map((d) => d.category));
     const reqDBS = approvedCats.has('dbs_certificate');
     const reqRTW = approvedCats.has('right_to_work') || approvedCats.has('visa_share_code');
     const reqRef = approvedCats.has('employment_reference');
@@ -447,18 +525,20 @@ app.get('/staff/:id', requireAuth, (req, res) => {
         : `<form method="post" action="/manager/staff/${u.id}/deactivate" style="display:inline" onsubmit="return confirm('Deactivate this staff member? This immediately signs them out of all devices and blocks sign-in until you reactivate them.')"><button class="btn ghost danger" type="submit" title="Revoke access and sign out of all devices">Deactivate</button></form>`) : ''}
     </div>
   </div>
+  ${rtwBanner}
   ${tilesHtml}
-  ${c.alerts.length ? `<div class="card" style="margin-bottom:1rem"><div class="card-h">Renewals & alerts</div><div class="card-b" style="padding:0">
+  ${c.alerts.length ? `<div class="card" style="margin-bottom:1rem"><div class="card-h">Renewals &amp; missing evidence
+    <span class="muted small" style="font-weight:400">· ${c.counts.missing} missing · ${c.counts.expired} expired</span></div><div class="card-b" style="padding:0">
     <table class="tbl"><tbody>${c.alerts.map((a) => `<tr><td>${esc(a.label)}</td><td class="muted">${esc(a.area)}</td>
-      <td>${fmtDate(a.date)}</td><td>${levelBadge(a.level, a.days < 0 ? `Expired ${-a.days}d ago` : `${a.days}d left`)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
+      <td>${a.level === 'missing' ? '<span class="muted">—</span>' : fmtDate(a.date)}</td><td>${levelBadge(a.level, alertStatusText(a))}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
   <div class="card" style="margin-bottom:1rem"><div class="card-h"><span>Documents <span class="muted small" style="font-weight:400">· ${docs.length} on file${docs.filter((d) => d.status === 'pending').length ? ` · ${docs.filter((d) => d.status === 'pending').length} pending review` : ''}</span></span>
     ${canEdit ? `<a class="btn ghost sm" href="/staff/${u.id}/edit#documents">Upload</a>` : ''}</div>
     <div class="card-b" style="padding:0">${docs.length ? `<div class="doc-list">${docRowsHtml}</div>` : '<div class="card-b muted">No documents uploaded yet.</div>'}</div></div>
   ${onboardingHtml}
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Employment history <span class="muted small">CQC Schedule 3</span></div>
     <div class="card-b" style="padding:0">
-    <table class="tbl"><thead><tr><th>Employer</th><th>Role</th><th>From</th><th>To</th><th>Care role</th><th>Reason for leaving</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>
-    ${emp.map((e) => `<tr><td><b>${esc(e.employer)}</b>${e.gap_explanation ? `<div class="muted small">Gap: ${esc(e.gap_explanation)}</div>` : ''}</td><td>${esc(e.job_title)}</td><td>${fmtDate(e.from_date)}</td><td>${e.to_date ? fmtDate(e.to_date) : 'Present'}</td><td>${e.is_care_role ? '<span class="badge blue">Care</span>' : '—'}</td><td class="muted">${esc(e.reason_for_leaving)}</td>${canEdit ? `<td><form method="post" action="/staff/${u.id}/employment/${e.id}/delete" onsubmit="return confirm('Delete this entry?')"><button class="linkbtn danger" type="submit">Delete</button></form></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canEdit ? 7 : 6}" class="muted" style="padding:1rem">No employment history recorded.</td></tr>`}
+    <table class="tbl"><thead><tr><th>Employer</th><th>Role</th><th>From</th><th>To</th><th>Care role</th><th>Reason for leaving</th>${canRemove ? '<th></th>' : ''}</tr></thead><tbody>
+    ${emp.map((e) => `<tr><td><b>${esc(e.employer)}</b>${e.gap_explanation ? `<div class="muted small">Gap: ${esc(e.gap_explanation)}</div>` : ''}</td><td>${esc(e.job_title)}</td><td>${fmtDate(e.from_date)}</td><td>${e.to_date ? fmtDate(e.to_date) : 'Present'}</td><td>${e.is_care_role ? '<span class="badge blue">Care</span>' : '—'}</td><td class="muted">${esc(e.reason_for_leaving)}</td>${canRemove ? `<td><form method="post" action="/staff/${u.id}/employment/${e.id}/delete" onsubmit="return confirm('Delete this employment history entry? It is CQC Schedule 3 evidence.')"><button class="linkbtn danger" type="submit">Delete</button></form></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canRemove ? 7 : 6}" class="muted" style="padding:1rem">No employment history recorded.</td></tr>`}
     </tbody></table>
     ${canEdit ? `<form method="post" action="/staff/${u.id}/employment" class="card-b" style="border-top:1px solid var(--line-2)"><div class="form-grid">
       <div class="field"><label>Employer</label><input name="employer" required></div>
@@ -472,14 +552,16 @@ app.get('/staff/:id', requireAuth, (req, res) => {
     </div></div>
   <div class="card" style="margin-bottom:1rem"><div class="card-h">References <span class="muted small">at least two, inc. most recent employer</span></div>
     <div class="card-b" style="padding:0">
-    <table class="tbl"><thead><tr><th>Referee</th><th>Organisation</th><th>Relationship</th><th>Recent employer</th><th>Status</th>${canEdit ? '<th></th>' : ''}</tr></thead><tbody>
-    ${refs.map((r) => `<tr><td><b>${esc(r.referee_name)}</b></td><td>${esc(r.referee_org)}</td><td>${esc(r.relationship)}</td><td>${r.is_most_recent_employer ? 'Yes' : '—'}</td><td>${levelBadge(r.status === 'received' ? 'ok' : r.status === 'rejected' ? 'expired' : 'warning', r.status)}</td>${canEdit ? `<td><form method="post" action="/staff/${u.id}/references/${r.id}/delete" onsubmit="return confirm('Delete this reference?')"><button class="linkbtn danger" type="submit">Delete</button></form></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canEdit ? 6 : 5}" class="muted" style="padding:1rem">No references recorded.</td></tr>`}
+    <table class="tbl"><thead><tr><th>Referee</th><th>Organisation</th><th>Relationship</th><th>Recent employer</th><th>Status</th>${canRemove ? '<th></th>' : ''}</tr></thead><tbody>
+    ${refs.map((r) => `<tr><td><b>${esc(r.referee_name)}</b></td><td>${esc(r.referee_org)}</td><td>${esc(r.relationship)}</td><td>${r.is_most_recent_employer ? 'Yes' : '—'}</td><td>${levelBadge(r.status === 'received' ? 'ok' : r.status === 'rejected' ? 'expired' : 'warning', r.status)}</td>${canRemove ? `<td><form method="post" action="/staff/${u.id}/references/${r.id}/delete" onsubmit="return confirm('Delete this reference? This may change the compliance status of the record.')"><button class="linkbtn danger" type="submit">Delete</button></form></td>` : ''}</tr>`).join('') || `<tr><td colspan="${canRemove ? 6 : 5}" class="muted" style="padding:1rem">No references recorded.</td></tr>`}
     </tbody></table>
     ${canEdit ? `<form method="post" action="/staff/${u.id}/references" class="card-b" style="border-top:1px solid var(--line-2)"><div class="form-grid">
       <div class="field"><label>Referee name</label><input name="referee_name" required></div>
       <div class="field"><label>Organisation</label><input name="referee_org"></div>
       <div class="field"><label>Relationship</label><input name="relationship" placeholder="e.g. Former line manager"></div>
-      <div class="field"><label>Status</label><select name="status"><option value="requested">Requested</option><option value="received">Received</option><option value="rejected">Rejected</option></select></div>
+      ${canVerifyEvidence(req.user)
+        ? '<div class="field"><label>Status</label><select name="status"><option value="requested">Requested</option><option value="received">Received</option><option value="rejected">Rejected</option></select></div>'
+        : '<div class="field"><label>Status</label><input value="Requested" disabled><div class="muted small">Your manager records a reference as received once they have it.</div></div>'}
     </div><div class="checkrow"><input type="checkbox" id="recent_emp" name="is_most_recent_employer" value="1"><label for="recent_emp">Most recent employer</label></div>
     <button class="btn sm">Add reference</button></form>` : ''}
     </div></div>
@@ -617,12 +699,21 @@ app.get('/documents/:id', requireAuth, (req, res) => {
   }
   res.sendFile(fp);
 });
+// Deleting evidence is management-only, including on your own record. Staff who
+// need a document corrected upload a replacement instead (the newer upload
+// supersedes the older one); the original stays on file for the audit trail
+// until a manager removes it.
 app.post('/documents/:id/delete', requireAuth, (req, res) => {
   const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
-  if (!d || !canEditStaff(req.user, d.user_id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
+  if (!d || !canAccessStaff(req.user, d.user_id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canDeleteEvidence(req.user)) {
+    audit(req.user, 'delete_document_denied', d.user_id, categoryLabel(d.category));
+    return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed',
+      message: 'Only a manager can remove a compliance document. If this document is wrong or out of date, upload a replacement — your manager will review it and the original stays on file until then.' }));
+  }
   try { fs.unlinkSync(path.join(UPLOADS_DIR, path.basename(d.file_path))); } catch {}
   db.prepare('DELETE FROM documents WHERE id=?').run(d.id);
-  audit(req.user, 'delete_document', d.user_id);
+  audit(req.user, 'delete_document', d.user_id, `${categoryLabel(d.category)}${d.title ? ` — ${d.title}` : ''}`);
   res.redirect(`/staff/${d.user_id}`);
 });
 
@@ -681,7 +772,7 @@ app.get('/staff/:id/summary.pdf', requireAuth, async (req, res) => {
   const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   const p = getProfile(u.id); const docs = listDocs(u.id);
   audit(req.user, 'export_summary_pdf', u.id);
-  const buf = await pdfBuffer((doc) => writeSummary(doc, { profile: p, user: u, docs, actor: req.user }));
+  const buf = await pdfBuffer((doc) => writeSummary(doc, { profile: attachEvidenceOne(p, u.id), user: u, docs, actor: req.user }));
   const safe = (p.full_name || u.email).replace(/[^a-z0-9]+/gi, '_');
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${safe}_compliance_summary.pdf"`);
@@ -692,7 +783,7 @@ app.get('/staff/:id/export.zip', requireAuth, async (req, res) => {
   const u = getUser(req.params.id); if (!u) return res.status(404).send(errorPage({ user: req.user, code: 404, title: 'Record not found', message: 'That record no longer exists.' }));
   const p = getProfile(u.id); const docs = listDocs(u.id);
   audit(req.user, 'export_zip_pack', u.id);
-  await streamZip(res, { profile: p, user: u, docs, actor: req.user, uploadsDir: UPLOADS_DIR });
+  await streamZip(res, { profile: attachEvidenceOne(p, u.id), user: u, docs, actor: req.user, uploadsDir: UPLOADS_DIR });
 });
 
 // Cross-staff export: every document of one category, across all staff, in a
@@ -721,21 +812,42 @@ app.post('/staff/:id/employment', requireAuth, (req, res) => {
   audit(req.user, 'add_employment', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
+// Employment history is CQC Schedule 3 evidence — a gap a staff member could
+// quietly remove is exactly what the record exists to show. Management-only.
 app.post('/staff/:id/employment/:eid/delete', requireAuth, (req, res) => {
-  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canDeleteEvidence(req.user)) {
+    audit(req.user, 'delete_employment_denied', Number(req.params.id));
+    return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed',
+      message: 'Only a manager can remove an employment history entry. If something is wrong, ask your manager to correct it.' }));
+  }
   db.prepare('DELETE FROM employment_history WHERE id=? AND user_id=?').run(req.params.eid, req.params.id);
   audit(req.user, 'delete_employment', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
 });
 app.post('/staff/:id/references', requireAuth, (req, res) => {
   if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
+  // A staff member may supply referee details, but only management may record a
+  // reference as RECEIVED. 'received' is what the compliance engine counts, so
+  // letting the subject set it would be self-certification — the same thing
+  // MANAGER_ONLY_KEYS already prevents for DBS and Right to Work.
+  const requested = String(req.body.status || 'requested');
+  const status = canVerifyEvidence(req.user) ? requested : 'requested';
+  if (status !== requested) audit(req.user, 'reference_status_downgraded', Number(req.params.id), `requested "${requested}" → recorded "requested"`);
   db.prepare('INSERT INTO reference_checks (user_id,referee_name,referee_org,relationship,is_most_recent_employer,status,created_at) VALUES (?,?,?,?,?,?,?)')
-    .run(req.params.id, req.body.referee_name || '', req.body.referee_org || '', req.body.relationship || '', req.body.is_most_recent_employer ? 1 : 0, req.body.status || 'requested', Date.now());
-  audit(req.user, 'add_reference', Number(req.params.id));
+    .run(req.params.id, req.body.referee_name || '', req.body.referee_org || '', req.body.relationship || '', req.body.is_most_recent_employer ? 1 : 0, status, Date.now());
+  audit(req.user, 'add_reference', Number(req.params.id), `${req.body.referee_name || '(unnamed)'} — ${status}`);
   res.redirect(`/staff/${req.params.id}`);
 });
+// A received reference is compliance evidence; removing one changes the record's
+// status. Management-only, as with documents and employment history.
 app.post('/staff/:id/references/:rid/delete', requireAuth, (req, res) => {
-  if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
+  if (!canAccessStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to view this record.' }));
+  if (!canDeleteEvidence(req.user)) {
+    audit(req.user, 'delete_reference_denied', Number(req.params.id));
+    return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed',
+      message: 'Only a manager can remove a reference. If a referee’s details are wrong, ask your manager to update them.' }));
+  }
   db.prepare('DELETE FROM reference_checks WHERE id=? AND user_id=?').run(req.params.rid, req.params.id);
   audit(req.user, 'delete_reference', Number(req.params.id));
   res.redirect(`/staff/${req.params.id}`);
@@ -749,10 +861,24 @@ app.get('/api/completeness', requireManager, (_req, res) => {
 // ---- alerts ----------------------------------------------------------------
 app.get('/alerts', requireOversight, (req, res) => {
   const rows = [];
-  for (const s of listStaff()) for (const a of computeCompliance(s).alerts) rows.push({ s, a });
-  rows.sort((x, y) => x.a.days - y.a.days);
+  for (const s of attachEvidence(listStaff())) for (const a of computeCompliance(s).alerts) rows.push({ s, a });
+  // Expired first (most overdue first), then never-recorded, then due soon.
+  // Missing items carry days:null and must not reach a numeric comparison.
+  const RANK = { expired: 0, missing: 1, critical: 2, warning: 3 };
+  rows.sort((x, y) => (RANK[x.a.level] - RANK[y.a.level])
+    || (x.a.days === null || y.a.days === null
+      ? String(x.s.full_name || x.s.email).localeCompare(String(y.s.full_name || y.s.email))
+      : x.a.days - y.a.days));
+  const nMissing = rows.filter((r) => r.a.level === 'missing').length;
+  const nExpired = rows.filter((r) => r.a.level === 'expired').length;
+  const view = String(req.query.show || 'all');
+  const shown = view === 'missing' ? rows.filter((r) => r.a.level === 'missing')
+    : view === 'expired' ? rows.filter((r) => r.a.level === 'expired')
+    : rows;
+  const showPill = (v, label, n) => `<a class="${view === v ? 'on' : ''}" href="/alerts?show=${v}">${label}<span class="c">${n}</span></a>`;
   const body = `
-  <div class="page-head"><div><h1>Compliance alerts</h1><p class="muted">${rows.length} renewals expired or due soon</p></div></div>
+  <div class="page-head"><div><h1>Compliance alerts</h1><p class="muted">${nExpired} expired · ${nMissing} missing entirely · ${rows.length - nExpired - nMissing} due soon</p></div></div>
+  <div class="filters">${showPill('all', 'All', rows.length)}${showPill('expired', 'Expired', nExpired)}${showPill('missing', 'Missing evidence', nMissing)}</div>
   ${req.query.reminder === 'sent' ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#1a7f4b">✓ Reminder digest emailed to ${esc(req.query.n || '')} recipient(s).</div></div>` : ''}
   ${req.query.reminder === 'error' ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#b42318">Could not send: ${esc(req.query.msg || '')}</div></div>` : ''}
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Email reminders ${mailConfigured() ? '<span class="badge green">Active</span>' : '<span class="badge amber">Not configured</span>'}</div>
@@ -762,9 +888,9 @@ app.get('/alerts', requireOversight, (req, res) => {
     </div></div>
   <div class="card"><div class="card-b" style="padding:0">
   <table class="tbl"><thead><tr><th>Staff</th><th>Requirement</th><th>Date</th><th>Status</th></tr></thead><tbody>
-  ${rows.map(({ s, a }) => `<tr onclick="location='/staff/${s.id}'" style="cursor:pointer">
+  ${shown.map(({ s, a }) => `<tr onclick="location='/staff/${s.id}'" style="cursor:pointer">
     <td><b>${esc(s.full_name || s.email)}</b></td><td>${esc(a.label)} <span class="muted small">· ${esc(a.area)}</span></td>
-    <td>${fmtDate(a.date)}</td><td>${levelBadge(a.level, a.days < 0 ? `Expired ${-a.days}d ago` : `${a.days}d left`)}</td></tr>`).join('')
+    <td>${a.level === 'missing' ? '<span class="muted">—</span>' : fmtDate(a.date)}</td><td>${levelBadge(a.level, alertStatusText(a))}</td></tr>`).join('')
     || '<tr><td colspan="4" class="muted" style="padding:1rem">No alerts — everyone is up to date.</td></tr>'}
   </tbody></table></div></div>`;
   res.send(layout({ user: req.user, title: 'Alerts', active: '/alerts', body }));
