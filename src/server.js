@@ -635,16 +635,15 @@ app.post('/staff/:id', requireAuth, (req, res) => {
   const isManager = isManagerLevel(req.user.role);
   const editableKeys = isManager ? PROFILE_KEYS : PROFILE_KEYS.filter(isSelfEditableKey);
   const checkboxKeys = new Set(PROFILE_SECTIONS.flatMap((s) => s.fields.filter((f) => f.type === 'checkbox').map((f) => f.key)));
-  const sets = [], vals = [];
-  for (const k of editableKeys) {
-    let v;
-    if (checkboxKeys.has(k)) v = req.body[k] ? 1 : 0;
-    else v = (req.body[k] ?? '').toString();
-    sets.push(`${k}=?`); vals.push(v);
-  }
-  if (sets.length) {
-    vals.push(Date.now(), u.id);
-    db.prepare(`UPDATE profiles SET ${sets.join(',')}, updated_at=? WHERE user_id=?`).run(...vals);
+  if (editableKeys.length) {
+    const vals = editableKeys.map((k) => (checkboxKeys.has(k) ? (req.body[k] ? 1 : 0) : (req.body[k] ?? '').toString()));
+    // Upsert, not a bare UPDATE: accounts created outside the invite/registration
+    // flow can have no profiles row yet, and a plain UPDATE silently affects zero
+    // rows for them — the form appears to save but nothing is ever persisted.
+    const cols = ['user_id', ...editableKeys, 'updated_at'];
+    const setClause = [...editableKeys.map((k) => `${k}=excluded.${k}`), 'updated_at=excluded.updated_at'].join(',');
+    db.prepare(`INSERT INTO profiles (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})
+      ON CONFLICT(user_id) DO UPDATE SET ${setClause}`).run(u.id, ...vals, Date.now());
   }
   audit(req.user, isManager ? 'update_profile' : 'update_own_contact', u.id);
   res.redirect(`/staff/${u.id}`);
