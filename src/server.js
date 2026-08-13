@@ -115,6 +115,13 @@ app.get('/account/password', requireAuth, (req, res) => {
 });
 app.post('/account/password', requireAuth, (req, res) => {
   const forced = !!req.user.must_change_password;
+  // Require proof of the current password before setting a new one — otherwise
+  // a hijacked session (stolen device, leaked cookie, XSS) is enough on its own
+  // to lock the real owner out permanently, and sessions here last 180 days.
+  const u = getUser(req.user.id);
+  if (!verifyPassword(String(req.body.current_password || ''), u.password)) {
+    return res.send(changePasswordPage({ forced, error: 'Current password is incorrect.' }));
+  }
   const pw = String(req.body.password || '');
   if (pw.length < 8) return res.send(changePasswordPage({ forced, error: 'Choose a password of at least 8 characters.' }));
   if (pw !== String(req.body.confirm || '')) return res.send(changePasswordPage({ forced, error: 'Passwords do not match.' }));
@@ -125,25 +132,27 @@ app.post('/account/password', requireAuth, (req, res) => {
 
 // ---- password reset (self-service) -----------------------------------------
 app.get('/forgot', (_req, res) => res.send(forgotPage()));
-app.post('/forgot', async (req, res) => {
+app.post('/forgot', (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const u = email ? getUserByEmail(email) : null;
   if (u) {
-    try {
-      const token = createPasswordReset(u.id);
-      const link = `${req.protocol}://${req.get('host')}/reset?token=${token}`;
-      await sendMail({
-        to: u.email,
-        subject: 'Reset your Sky Home Living password',
-        text: `We received a request to reset your password.\n\nReset it here (expires in 1 hour, single use):\n${link}\n\nIf you didn't request this, ignore this email — your password won't change.`,
-        html: `<div style="font-family:Segoe UI,Arial,sans-serif;color:#1f2937;max-width:520px">
-          <h2 style="color:#0c2a4d">Reset your password</h2>
-          <p>We received a request to reset the password for your Sky Home Living staff portal account.</p>
-          <p><a href="${link}" style="background:#0c2a4d;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">Choose a new password</a></p>
-          <p style="color:#555;font-size:13px">This link expires in 1 hour and can be used once. If you didn't request it, ignore this email — your password won't change.</p></div>`,
-      });
-      audit(u, 'password_reset_requested');
-    } catch (e) { console.error('[reset] email failed:', e.message); }
+    const token = createPasswordReset(u.id);
+    const link = `${req.protocol}://${req.get('host')}/reset?token=${token}`;
+    // Fire-and-forget: the response below must return in the same time whether
+    // or not the account exists. Awaiting the email send here would make the
+    // "account exists" case measurably slower than the "doesn't exist" case,
+    // leaking exactly what the neutral wording below is meant to hide.
+    sendMail({
+      to: u.email,
+      subject: 'Reset your Sky Home Living password',
+      text: `We received a request to reset your password.\n\nReset it here (expires in 1 hour, single use):\n${link}\n\nIf you didn't request this, ignore this email — your password won't change.`,
+      html: `<div style="font-family:Segoe UI,Arial,sans-serif;color:#1f2937;max-width:520px">
+        <h2 style="color:#0c2a4d">Reset your password</h2>
+        <p>We received a request to reset the password for your Sky Home Living staff portal account.</p>
+        <p><a href="${link}" style="background:#0c2a4d;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">Choose a new password</a></p>
+        <p style="color:#555;font-size:13px">This link expires in 1 hour and can be used once. If you didn't request it, ignore this email — your password won't change.</p></div>`,
+    }).then(() => audit(u, 'password_reset_requested'))
+      .catch((e) => console.error('[reset] email failed:', e.message));
   }
   // Always neutral — never reveal whether an account exists.
   res.send(forgotPage({ message: 'If that email matches an account, we have sent a reset link. Please check your inbox.' }));
@@ -1504,6 +1513,7 @@ function changePasswordPage({ error = '', forced = false } = {}) {
     <p class="muted" style="margin-top:0">${forced ? 'Your manager set a temporary password. Please choose your own to continue.' : 'Update the password for your account.'}</p>
     ${error ? `<div class="flash err">${esc(error)}</div>` : ''}
     <form method="post" action="/account/password">
+      <div class="field"><label>${forced ? 'Temporary password' : 'Current password'}</label><input name="current_password" type="password" required></div>
       <div class="field"><label>New password</label><input name="password" type="password" minlength="8" required></div>
       <div class="field"><label>Confirm new password</label><input name="confirm" type="password" minlength="8" required></div>
       <button class="btn" style="width:100%;justify-content:center">Save new password</button>
