@@ -1084,6 +1084,7 @@ app.get('/admin/invites', requireManager, (req, res) => {
   const origin = `${req.protocol}://${req.get('host')}`;
   const body = `
   <div class="page-head"><div><h1>Invitations</h1><p class="muted">Invite a staff member to create their account</p></div></div>
+  ${req.query.err ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#b42318">${esc(req.query.err)}</div></div>` : ''}
   <div class="card" style="margin-bottom:1.2rem"><div class="card-b">
     <form method="post" action="/admin/invites"><div class="form-grid">
       <div class="field"><label>Email</label><input name="email" type="email" required></div>
@@ -1102,14 +1103,23 @@ app.get('/admin/invites', requireManager, (req, res) => {
   res.send(layout({ user: req.user, title: 'Invitations', active: '/admin/invites', body }));
 });
 app.post('/admin/invites', requireManager, (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!email) return res.redirect('/admin/invites?err=' + encodeURIComponent('Email is required.'));
+  if (getUserByEmail(email)) {
+    return res.redirect('/admin/invites?err=' + encodeURIComponent('An account already exists for this email — no invite needed.'));
+  }
   const code = `${rand4()}-${rand4()}-${rand4()}`;
   const now = Date.now();
   // Validate the requested role; only an admin may grant manager/admin.
   let role = ROLES.some((r) => r.value === req.body.role) ? req.body.role : 'carer';
   if (req.user.role !== 'admin' && (role === 'manager' || role === 'admin')) role = 'coordinator';
+  // A fresh invite supersedes any prior unused one for the same email, so
+  // re-inviting someone doesn't leave stale duplicate codes sitting around
+  // showing as "Active" alongside the new one.
+  db.prepare('DELETE FROM invite_codes WHERE email=? AND used_at IS NULL').run(email);
   db.prepare('INSERT INTO invite_codes (code,email,full_name,job_title,role,created_by_email,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?)')
-    .run(code, String(req.body.email || '').toLowerCase(), req.body.full_name || '', req.body.job_title || '', role, req.user.email, now, now + 14 * 86400000);
-  audit(req.user, 'create_invite', null, `${req.body.email || ''} as ${role}`);
+    .run(code, email, req.body.full_name || '', req.body.job_title || '', role, req.user.email, now, now + 14 * 86400000);
+  audit(req.user, 'create_invite', null, `${email} as ${role}`);
   res.redirect('/admin/invites');
 });
 const rand4 = () => randomBytes(3).toString('hex').toUpperCase().slice(0, 4);
