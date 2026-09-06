@@ -174,7 +174,10 @@ app.post('/reset', (req, res) => {
 });
 
 // ---- registration via invite ----------------------------------------------
-app.get('/register', (req, res) => res.send(registerPage({})));
+app.get('/register', (req, res) => res.send(registerPage({
+  code: String(req.query.code || ''),
+  email: String(req.query.email || ''),
+})));
 app.post('/register', (req, res) => {
   const code = String(req.body.code || '').trim().toUpperCase();
   const email = String(req.body.email || '').trim().toLowerCase();
@@ -1084,6 +1087,7 @@ app.get('/admin/invites', requireManager, (req, res) => {
   const origin = `${req.protocol}://${req.get('host')}`;
   const body = `
   <div class="page-head"><div><h1>Invitations</h1><p class="muted">Invite a staff member to create their account</p></div></div>
+  ${req.query.sent ? '<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#1a7f4b">✓ Invite created and emailed to the staff member.</div></div>' : ''}
   ${req.query.err ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#b42318">${esc(req.query.err)}</div></div>` : ''}
   <div class="card" style="margin-bottom:1.2rem"><div class="card-b">
     <form method="post" action="/admin/invites"><div class="form-grid">
@@ -1094,15 +1098,32 @@ app.get('/admin/invites', requireManager, (req, res) => {
     </div><button class="btn">Create invite</button></div></form></div>
   <div class="card"><div class="card-b" style="padding:0">
   <table class="tbl"><thead><tr><th>Code</th><th>Email</th><th>Role</th><th>Expires</th><th>Status</th><th>Link</th></tr></thead><tbody>
-  ${invites.map((i) => `<tr><td><code>${esc(i.code)}</code></td><td>${esc(i.email)}</td>
+  ${invites.map((i) => {
+    // Carries the code + email as query params so the link actually logs someone
+    // straight into a pre-filled registration form — previously this was just the
+    // bare /register URL, identical for every invite, which sent staff to a blank
+    // form with no idea what code to enter unless it was also read out separately.
+    const url = `${origin}/register?code=${encodeURIComponent(i.code)}&email=${encodeURIComponent(i.email)}`;
+    return `<tr><td><code>${esc(i.code)}</code></td><td>${esc(i.email)}</td>
     <td>${esc(roleLabel(i.role || 'carer'))}</td>
     <td>${i.expires_at ? fmtDate(new Date(i.expires_at).toISOString()) : '—'}</td>
     <td>${i.used_at ? '<span class="badge grey">Used</span>' : (i.expires_at && i.expires_at < Date.now() ? '<span class="badge red">Expired</span>' : '<span class="badge green">Active</span>')}</td>
-    <td class="small">${esc(origin)}/register</td></tr>`).join('') || '<tr><td colspan="6" class="muted" style="padding:1rem">No invites yet.</td></tr>'}
+    <td><div style="display:flex;gap:.4rem;align-items:center">
+      <input class="reset-url" value="${esc(url)}" readonly onclick="this.select()" style="flex:1;min-width:220px;font-size:.78rem;padding:.35rem .5rem;border:1px solid var(--line);border-radius:7px;background:#fff">
+      <button type="button" class="btn ghost sm" data-copy="${esc(url)}">Copy</button></div></td></tr>`;
+  }).join('') || '<tr><td colspan="6" class="muted" style="padding:1rem">No invites yet.</td></tr>'}
   </tbody></table></div></div>`;
-  res.send(layout({ user: req.user, title: 'Invitations', active: '/admin/invites', body }));
+  const scripts = `<script>
+    document.querySelectorAll('[data-copy]').forEach(function(b){
+      b.addEventListener('click',function(){
+        var v=b.getAttribute('data-copy');
+        navigator.clipboard.writeText(v).then(function(){var t=b.textContent;b.textContent='Copied';setTimeout(function(){b.textContent=t;},1200);});
+      });
+    });
+  </script>`;
+  res.send(layout({ user: req.user, title: 'Invitations', active: '/admin/invites', body, scripts }));
 });
-app.post('/admin/invites', requireManager, (req, res) => {
+app.post('/admin/invites', requireManager, async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   if (!email) return res.redirect('/admin/invites?err=' + encodeURIComponent('Email is required.'));
   if (getUserByEmail(email)) {
@@ -1120,7 +1141,37 @@ app.post('/admin/invites', requireManager, (req, res) => {
   db.prepare('INSERT INTO invite_codes (code,email,full_name,job_title,role,created_by_email,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?)')
     .run(code, email, req.body.full_name || '', req.body.job_title || '', role, req.user.email, now, now + 14 * 86400000);
   audit(req.user, 'create_invite', null, `${email} as ${role}`);
-  res.redirect('/admin/invites');
+
+  // Email the invite directly — previously a manager had to manually copy the
+  // link and send it themselves, which is exactly the kind of human step where
+  // the wrong link (or no link) reaches the new starter. Awaited (unlike
+  // /forgot's fire-and-forget) since there's no account-existence secret to
+  // protect here — the manager already knows who they're inviting, and needs
+  // to know now if the email didn't go out, so they can fall back to the
+  // copyable link below instead.
+  const origin = `${req.protocol}://${req.get('host')}`;
+  const link = `${origin}/register?code=${encodeURIComponent(code)}&email=${encodeURIComponent(email)}`;
+  const firstName = String(req.body.full_name || '').trim().split(/\s+/)[0];
+  if (!mailConfigured()) {
+    return res.redirect('/admin/invites?err=' + encodeURIComponent('Invite created, but email is not configured — copy the link below and send it manually.'));
+  }
+  try {
+    await sendMail({
+      to: email,
+      subject: 'You’re invited to the Sky Home Living staff portal',
+      text: `Hi${firstName ? ' ' + firstName : ''},\n\n${req.user.name || 'Your manager'} has invited you to set up your account on the Sky Home Living staff compliance portal.\n\nCreate your account here (link expires in 14 days):\n${link}\n\nIf you weren't expecting this, you can ignore this email.`,
+      html: `<div style="font-family:Segoe UI,Arial,sans-serif;color:#1f2937;max-width:520px">
+        <h2 style="color:#0c2a4d">You're invited</h2>
+        <p>${esc(req.user.name || 'Your manager')} has invited you to set up your account on the Sky Home Living staff compliance portal.</p>
+        <p><a href="${link}" style="background:#0c2a4d;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">Create your account</a></p>
+        <p style="color:#555;font-size:13px">This link expires in 14 days. If you weren't expecting this, you can ignore this email.</p></div>`,
+    });
+    audit(req.user, 'invite_email_sent', null, email);
+    res.redirect('/admin/invites?sent=1');
+  } catch (e) {
+    audit(req.user, 'invite_email_failed', null, `${email}: ${e.message}`);
+    res.redirect('/admin/invites?err=' + encodeURIComponent(`Invite created, but the email could not be sent (${e.message}). Copy the link below and send it manually.`));
+  }
 });
 const rand4 = () => randomBytes(3).toString('hex').toUpperCase().slice(0, 4);
 
