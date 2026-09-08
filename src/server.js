@@ -537,6 +537,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
         : `<form method="post" action="/manager/staff/${u.id}/deactivate" style="display:inline" onsubmit="return confirm('Deactivate this staff member? This immediately signs them out of all devices and blocks sign-in until you reactivate them.')"><button class="btn ghost danger" type="submit" title="Revoke access and sign out of all devices">Deactivate</button></form>`) : ''}
     </div>
   </div>
+  ${req.query.saved ? '<div class="flash ok">✓ Changes saved.</div>' : ''}
   ${rtwBanner}
   ${tilesHtml}
   ${c.alerts.length ? `<div class="card" style="margin-bottom:1rem"><div class="card-h">Renewals &amp; missing evidence
@@ -616,25 +617,35 @@ app.get('/staff/:id/edit', requireAuth, (req, res) => {
       <a class="btn ghost" href="/staff/${u.id}">Cancel</a></div>
   </form>
   <div class="card" id="documents" style="margin:1.4rem 0"><div class="card-h">Upload a document</div><div class="card-b">
-    <form method="post" action="/staff/${u.id}/documents" enctype="multipart/form-data">
+    <form method="post" action="/staff/${u.id}/documents" enctype="multipart/form-data" id="uploadForm">
       <div class="form-grid">
         <div class="field"><label>Document type</label><select name="category" required><option value="">Select…</option>${cats}</select></div>
         <div class="field"><label>Title / description</label><input name="title" placeholder="e.g. DBS certificate 2026"></div>
         <div class="field"><label>Expiry date (if any)</label><input type="date" name="expiry_date"></div>
       </div>
       <label class="dropzone" id="dz">Drag & drop a file here, or click to choose<br><span class="small">PDF, image or Word · up to 25&nbsp;MB</span>
-        <input id="file" name="file" type="file" required style="display:none"
+        <input id="file" name="file" type="file" style="display:none"
           accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif,.doc,.docx"></label>
       <div id="fname" class="small muted" style="margin:.5rem 0"></div>
+      <div id="uperr" class="flash err" style="display:none;margin:.5rem 0"></div>
       <button class="btn" type="submit">Upload document</button>
     </form></div></div>
   <script>
-    const dz=document.getElementById('dz'),fi=document.getElementById('file'),fn=document.getElementById('fname');
+    const dz=document.getElementById('dz'),fi=document.getElementById('file'),fn=document.getElementById('fname'),
+          uf=document.getElementById('uploadForm'),ue=document.getElementById('uperr');
     dz.addEventListener('click',()=>fi.click());
-    fi.addEventListener('change',()=>fn.textContent=fi.files[0]?('Selected: '+fi.files[0].name):'');
+    fi.addEventListener('change',()=>{fn.textContent=fi.files[0]?('Selected: '+fi.files[0].name):'';ue.style.display='none';});
     ['dragover','dragenter'].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.add('drag')}));
     ['dragleave','drop'].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.remove('drag')}));
-    dz.addEventListener('drop',ev=>{if(ev.dataTransfer.files[0]){fi.files=ev.dataTransfer.files;fn.textContent='Selected: '+ev.dataTransfer.files[0].name;}});
+    dz.addEventListener('drop',ev=>{if(ev.dataTransfer.files[0]){fi.files=ev.dataTransfer.files;fn.textContent='Selected: '+ev.dataTransfer.files[0].name;ue.style.display='none';}});
+    // The file input is intentionally hidden (dz is the real click target), but a
+    // *hidden* required field can't show the browser's native "please fill this
+    // in" bubble — it has nowhere visible to anchor to — so clicking Upload with
+    // no file chosen just did nothing, with zero feedback. Validate explicitly
+    // instead and show a real, visible message.
+    uf.addEventListener('submit',(ev)=>{
+      if(!fi.files.length){ev.preventDefault();ue.textContent='Choose a file before uploading — tap the box above.';ue.style.display='block';ue.scrollIntoView({block:'center'});}
+    });
   </script>`;
   res.send(layout({ user: req.user, title: 'Edit record', active: '/staff', body }));
 });
@@ -658,7 +669,11 @@ app.post('/staff/:id', requireAuth, (req, res) => {
       ON CONFLICT(user_id) DO UPDATE SET ${setClause}`).run(u.id, ...vals, Date.now());
   }
   audit(req.user, isManager ? 'update_profile' : 'update_own_contact', u.id);
-  res.redirect(`/staff/${u.id}`);
+  // Previously a silent redirect back to the same-looking view page — plausibly
+  // read as "the Save button doesn't do anything" by someone who can't tell
+  // their edit actually landed. Every other save-style action in this app
+  // (temp password, invite) already confirms itself; this one didn't.
+  res.redirect(`/staff/${u.id}?saved=1`);
 });
 
 // ---- documents -------------------------------------------------------------
