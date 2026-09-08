@@ -598,6 +598,7 @@ app.get('/staff/:id/edit', requireAuth, (req, res) => {
   const body = `
   <div class="page-head"><div><h1>Edit record</h1><p class="muted">${esc(p.full_name || u.email)}</p></div>
     <a class="btn ghost" href="/staff/${u.id}">Cancel</a></div>
+  ${req.query.err ? `<div class="flash err">${esc(req.query.err)}</div>` : ''}
   ${!isManager ? `<div class="flash info">Please fill in your own details below and upload your documents. The <b>verification fields</b> (DBS, Right to Work and training <i>status</i>) are confirmed by your manager and shown read-only — that's why they can't be edited here.</div>` : ''}
   <div class="card" style="margin-bottom:1rem"><div class="card-h">Profile photo</div><div class="card-b">
     <div class="photo-edit">
@@ -703,9 +704,22 @@ const photoUpload = multer({
 
 app.post('/staff/:id/documents', requireAuth, (req, res) => {
   if (!canEditStaff(req.user, req.params.id)) return res.status(403).send(errorPage({ user: req.user, code: 403, title: 'Not allowed', message: 'You do not have permission to edit this record.' }));
+  // Errors here used to be a bare res.send(string) — no page styling, no way back
+  // to the form, so a failed upload (wrong file type, over the 25MB limit) looked
+  // like the app had crashed rather than a fixable mistake. Redirect back to the
+  // form with a real message instead, same pattern as every other form error in
+  // this app (?err=).
+  const backToForm = (msg) => res.redirect(`/staff/${req.params.id}/edit?err=${encodeURIComponent(msg)}#documents`);
   upload.single('file')(req, res, (err) => {
-    if (err) return res.status(400).send('Upload failed: ' + err.message);
-    if (!req.file) return res.status(400).send('No file (allowed: PDF, image, Word).');
+    if (err) {
+      const msg = err.code === 'LIMIT_FILE_SIZE'
+        ? 'That file is too large — documents must be under 25 MB.'
+        : `Upload failed: ${err.message}`;
+      return backToForm(msg);
+    }
+    if (!req.file) {
+      return backToForm('That file type isn’t supported. Allowed: PDF, Word (.doc/.docx), or an image (JPG, PNG, WebP, HEIC).');
+    }
     db.prepare('INSERT INTO documents (user_id,category,title,file_path,mime_type,expiry_date,status,uploaded_at) VALUES (?,?,?,?,?,?,?,?)')
       .run(req.params.id, req.body.category || 'other', req.body.title || '', req.file.filename, req.file.mimetype, req.body.expiry_date || '', 'pending', Date.now());
     audit(req.user, 'upload_document', Number(req.params.id), req.body.category || '');
