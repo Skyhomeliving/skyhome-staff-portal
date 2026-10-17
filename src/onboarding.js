@@ -5,10 +5,12 @@
 // Branding matches the compliance summary (NAVY header band, A4, 50pt margin).
 
 const NAVY = '#0c2a4d';
-const ORG = 'Sky Home Living Limited';
-const ADDRESS = 'Ingenuity House, Bickenhill Lane, Birmingham, B37 7HQ';
-const CONTACT = 'info@skyhomeliving.co.uk · www.skyhomeliving.co.uk';
-export const DEFAULT_MANAGER = 'Joseph Onus, Managing Director & Nominated Individual';
+import { ORG as ORG_CONFIG } from './org.js';
+
+const ORG = ORG_CONFIG.legalName;
+const ADDRESS = ORG_CONFIG.address;
+const CONTACT = ORG_CONFIG.contact;
+export const DEFAULT_MANAGER = ORG_CONFIG.defaultManager;
 // Full-time equivalent used to pro-rata statutory holiday for part-time staff.
 const FTE_HOURS = 37.5;
 

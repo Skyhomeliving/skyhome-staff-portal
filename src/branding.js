@@ -4,6 +4,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { db, DATA_DIR } from './db.js';
+import { ORG } from './org.js';
 
 export const BRAND_DIR = path.join(DATA_DIR, 'branding');
 fs.mkdirSync(BRAND_DIR, { recursive: true });
@@ -22,15 +23,15 @@ export function customLogoPath() {
 }
 
 export function getBranding() {
-  const orgName = brandMeta.get('org_name') || 'Sky Home Living';
+  const orgName = brandMeta.get('org_name') || ORG.name;
   const hasCustom = !!customLogoPath();
   const ver = brandMeta.get('logo_ver') || '1';
   return {
     orgName,
     hasCustom,
     // full logo (login / large): custom if set, else official wordmark logo
-    loginLogo: hasCustom ? `/branding/logo?v=${ver}` : '/sky-logo.png',
+    loginLogo: hasCustom ? `/branding/logo?v=${ver}` : ORG.loginLogo,
     // compact mark (sidebar): custom if set, else official icon
-    markLogo: hasCustom ? `/branding/logo?v=${ver}` : '/sky-icon.png',
+    markLogo: hasCustom ? `/branding/logo?v=${ver}` : ORG.markLogo,
   };
 }

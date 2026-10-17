@@ -14,7 +14,7 @@ const fmt = (s) => { if (!s) return '—'; const d = new Date(s); return Number.
 const sectionTitle = (doc, t) => { doc.moveDown(0.5).fontSize(11).fillColor(NAVY).text(t).fillColor('#000').moveDown(0.15); };
 const kv = (doc, k, v) => { doc.fontSize(9.5).fillColor('#555').text(`${k}:  `, { continued: true }).fillColor('#111').text(v); };
 
-export function writeSummary(doc, { profile, user, docs, actor, org = 'Sky Home Living Limited' }) {
+export function writeSummary(doc, { profile, user, docs, actor, org = ORG.legalName }) {
   // Evidence context comes from the caller (documents in hand + reference count),
   // so this regulator-facing PDF reports the same status as the portal. It
   // previously judged expiry dates only and could print COMPLIANT for a record

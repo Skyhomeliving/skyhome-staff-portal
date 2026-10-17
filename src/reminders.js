@@ -7,9 +7,10 @@ import { Resend } from 'resend';
 import { db } from './db.js';
 import { computeCompliance } from './compliance.js';
 import { attachEvidence } from './evidence.js';
+import { ORG } from './org.js';
 
 // Must be an address on the Resend-verified domain (skyhomeliving.co.uk).
-const FROM = 'Sky Home Living <info@skyhomeliving.co.uk>';
+const FROM = ORG.mailFrom;
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // Email is only usable when the Resend API key is present.
@@ -74,7 +75,7 @@ function buildHtml(items) {
       <th style="text-align:left;padding:6px 10px;border-bottom:2px solid #ddd">Status</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="4" style="padding:12px">Nothing due — all staff are up to date. 🎉</td></tr>'}</tbody></table>
     ${base ? `<p style="margin-top:18px"><a href="${base}/alerts" style="background:#0c2a4d;color:#fff;padding:9px 16px;border-radius:8px;text-decoration:none">Open the compliance portal</a></p>` : ''}
-    <p style="color:#999;font-size:12px;margin-top:22px">Automated reminder from the Sky Home Living staff compliance portal. Confidential — contains personal data.</p></div>` };
+    <p style="color:#999;font-size:12px;margin-top:22px">Automated reminder from the ${esc(ORG.name)} staff compliance portal. Confidential — contains personal data.</p></div>` };
 }
 
 // Generic transactional send (password reset, bulk email, etc.) via Resend.

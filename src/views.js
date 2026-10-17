@@ -1,5 +1,8 @@
 // views.js — HTML shell, reusable components, and the login page.
 import { getBranding } from './branding.js';
+import { ORG, IS_DEMO } from './org.js';
+
+const DEMO_BANNER = '<div class="demo-banner" role="note"><b>Demonstration</b> — all people and records here are fictional sample data.</div>';
 import { roleLabel, isFrontline, isOversight, isManagerLevel, isAdmin } from './compliance.js';
 export { roleLabel };
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
@@ -109,16 +112,17 @@ export function layout({ user, title = 'Compliance Records', active = '/', body 
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><meta name="theme-color" content="#0c2a4d">
-<link rel="icon" href="/favicon.png">
+<link rel="icon" href="${ORG.favicon}">
 <title>${esc(title)} · ${esc(brand.orgName)}</title><link rel="stylesheet" href="/styles.css"></head>
 <body><div class="app">
   <aside class="sidebar" id="sidebar">
-    <div class="brand"><div class="brandmark"><img src="${brand.markLogo}" alt=""></div><div><b>${esc(brand.orgName)}</b><span>Compliance Records</span></div></div>
+    <div class="brand"><div class="brandmark"><img src="${brand.markLogo}" alt=""></div><div><b>${esc(brand.orgName)}</b><span>${esc(ORG.sidebarSubtitle)}</span></div></div>
     <nav class="nav">${nav}</nav>
     <div class="side-foot">Signed in as<br><b style="color:#fff">${esc(user.name || user.email)}</b><br>
       <a href="/logout">${icon('logout')} Sign out</a></div>
   </aside>
   <div class="main">
+    ${IS_DEMO ? DEMO_BANNER : ''}
     <div class="topbar">
       <button class="burger" onclick="document.getElementById('sidebar').classList.toggle('open')">☰ Menu</button>
       <div></div>
@@ -141,7 +145,7 @@ export function errorPage({ user = null, code = 404, title = 'Not found', messag
   const brand = getBranding();
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
-<link rel="icon" href="/favicon.png"><title>${esc(title)} · ${esc(brand.orgName)}</title>
+<link rel="icon" href="${ORG.favicon}"><title>${esc(title)} · ${esc(brand.orgName)}</title>
 <link rel="stylesheet" href="/styles.css"></head>
 <body><div class="auth-wrap"><div class="auth-card">${body}</div></div></body></html>`;
 }
@@ -150,11 +154,12 @@ export function loginPage({ error = '', message = '' } = {}) {
   const brand = getBranding();
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
-<link rel="icon" href="/favicon.png">
+<link rel="icon" href="${ORG.favicon}">
 <title>Sign in · ${esc(brand.orgName)}</title><link rel="stylesheet" href="/styles.css"></head>
 <body><div class="auth-wrap"><div class="auth-card">
   <img class="login-logo" src="${brand.loginLogo}" alt="${esc(brand.orgName)}">
-  <p class="muted" style="text-align:center;margin-top:.1rem;margin-bottom:1rem">Staff Compliance Records</p>
+  <p class="muted" style="text-align:center;margin-top:.1rem;margin-bottom:1rem">${esc(ORG.loginSubtitle)}</p>
+  ${IS_DEMO ? DEMO_BANNER : ''}
   ${error ? `<div class="flash err">${esc(error)}</div>` : ''}
   ${message ? `<div class="flash ok">${esc(message)}</div>` : ''}
   <form method="post" action="/login">
@@ -170,7 +175,7 @@ export function loginPage({ error = '', message = '' } = {}) {
 function authShell(brand, title, inner) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
-<link rel="icon" href="/favicon.png"><title>${esc(title)} · ${esc(brand.orgName)}</title>
+<link rel="icon" href="${ORG.favicon}"><title>${esc(title)} · ${esc(brand.orgName)}</title>
 <link rel="stylesheet" href="/styles.css"></head>
 <body><div class="auth-wrap"><div class="auth-card">${inner}</div></div></body></html>`;
 }

@@ -29,6 +29,7 @@ import { layout, loginPage, forgotPage, resetPage, errorPage, esc, fmtDate, ragB
 import { securityMiddleware } from './security.js';
 import { startBackupScheduler } from './backup.js';
 import { scoreAllStaff } from './completeness.js';
+import { ORG } from './org.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -144,11 +145,11 @@ app.post('/forgot', (req, res) => {
     // leaking exactly what the neutral wording below is meant to hide.
     sendMail({
       to: u.email,
-      subject: 'Reset your Sky Home Living password',
+      subject: `Reset your ${ORG.name} password`,
       text: `We received a request to reset your password.\n\nReset it here (expires in 1 hour, single use):\n${link}\n\nIf you didn't request this, ignore this email — your password won't change.`,
       html: `<div style="font-family:Segoe UI,Arial,sans-serif;color:#1f2937;max-width:520px">
         <h2 style="color:#0c2a4d">Reset your password</h2>
-        <p>We received a request to reset the password for your Sky Home Living staff portal account.</p>
+        <p>We received a request to reset the password for your ${esc(ORG.name)} staff portal account.</p>
         <p><a href="${link}" style="background:#0c2a4d;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">Choose a new password</a></p>
         <p style="color:#555;font-size:13px">This link expires in 1 hour and can be used once. If you didn't request it, ignore this email — your password won't change.</p></div>`,
     }).then(() => audit(u, 'password_reset_requested'))
@@ -453,7 +454,7 @@ app.get('/staff/:id', requireAuth, (req, res) => {
       : rtwRisk.level === 'no_basis' ? 'No Right to Work basis recorded'
       : 'Right to Work has not been confirmed';
     const detail = forManager
-      ? `Continuing to employ this person without a valid Right to Work check is an illegal-working risk and may expose Sky Home Living Ltd to a Home Office civil penalty. Re-verify before their next shift and record the outcome. <a href="/staff/${u.id}/edit#rtw">Update Right to Work</a>`
+      ? `Continuing to employ this person without a valid Right to Work check is an illegal-working risk and may expose ${ORG.shortLegalName} to a Home Office civil penalty. Re-verify before their next shift and record the outcome. <a href="/staff/${u.id}/edit#rtw">Update Right to Work</a>`
       : 'Please contact your manager so your Right to Work check can be brought up to date.';
     rtwBanner = `<div class="riskbanner${forManager ? '' : ' soft'}" role="alert">${warnIcon}
       <div><div class="rb-title">${esc(headline)}</div><div class="rb-body">${detail}</div></div></div>`;
@@ -1187,11 +1188,11 @@ app.post('/admin/invites', requireManager, async (req, res) => {
   try {
     await sendMail({
       to: email,
-      subject: 'You’re invited to the Sky Home Living staff portal',
-      text: `Hi${firstName ? ' ' + firstName : ''},\n\n${req.user.name || 'Your manager'} has invited you to set up your account on the Sky Home Living staff compliance portal.\n\nCreate your account here (link expires in 14 days):\n${link}\n\nIf you weren't expecting this, you can ignore this email.`,
+      subject: `You’re invited to the ${ORG.name} staff portal`,
+      text: `Hi${firstName ? ' ' + firstName : ''},\n\n${req.user.name || 'Your manager'} has invited you to set up your account on the ${ORG.name} staff compliance portal.\n\nCreate your account here (link expires in 14 days):\n${link}\n\nIf you weren't expecting this, you can ignore this email.`,
       html: `<div style="font-family:Segoe UI,Arial,sans-serif;color:#1f2937;max-width:520px">
         <h2 style="color:#0c2a4d">You're invited</h2>
-        <p>${esc(req.user.name || 'Your manager')} has invited you to set up your account on the Sky Home Living staff compliance portal.</p>
+        <p>${esc(req.user.name || 'Your manager')} has invited you to set up your account on the ${ORG.name} staff compliance portal.</p>
         <p><a href="${link}" style="background:#0c2a4d;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">Create your account</a></p>
         <p style="color:#555;font-size:13px">This link expires in 14 days. If you weren't expecting this, you can ignore this email.</p></div>`,
     });
@@ -1253,7 +1254,7 @@ function resolveEmailRecipients(mode, body) {
 function bulkEmailHtml(text) {
   const safe = esc(text).replace(/\r\n|\r|\n/g, '<br>');
   return `<div style="font-family:Segoe UI,Arial,sans-serif;color:#1f2937;max-width:640px;font-size:15px;line-height:1.55">${safe}
-    <p style="color:#9aa3af;font-size:12px;margin-top:26px">Sent via the Sky Home Living staff portal.</p></div>`;
+    <p style="color:#9aa3af;font-size:12px;margin-top:26px">Sent via the ${esc(ORG.name)} staff portal.</p></div>`;
 }
 
 const emailStatusBadge = (s) =>
@@ -1542,7 +1543,7 @@ app.get('/admin/settings', requireAdmin, (req, res) => {
   ${req.query.err ? `<div class="card" style="margin-bottom:1rem"><div class="card-b" style="color:#b42318">${esc(req.query.err)}</div></div>` : ''}
   <div class="grid cols-2">
     <div class="card"><div class="card-h">Logo</div><div class="card-b">
-      <p class="muted small" style="margin-top:0">Shown on the sign-in screen and the sidebar. ${b.hasCustom ? 'Currently using your uploaded logo.' : 'Currently using the official Sky Home Living logo.'}</p>
+      <p class="muted small" style="margin-top:0">Shown on the sign-in screen and the sidebar. ${b.hasCustom ? 'Currently using your uploaded logo.' : `Currently using the official ${esc(ORG.name)} logo.`}</p>
       <img class="logo-preview" src="${b.loginLogo}" alt="Current logo">
       <form method="post" action="/admin/branding/logo" enctype="multipart/form-data" style="margin-top:1rem">
         <div class="field"><label>Upload a new logo (PNG, JPG, SVG or WebP · max 4&nbsp;MB)</label>
@@ -1561,7 +1562,7 @@ app.get('/admin/settings', requireAdmin, (req, res) => {
   res.send(layout({ user: req.user, title: 'Settings', active: '/admin/settings', body }));
 });
 app.post('/admin/settings', requireAdmin, (req, res) => {
-  brandMeta.set('org_name', (req.body.org_name || 'Sky Home Living').trim() || 'Sky Home Living');
+  brandMeta.set('org_name', (req.body.org_name || ORG.name).trim() || ORG.name);
   audit(req.user, 'update_settings');
   res.redirect('/admin/settings?saved=1');
 });
@@ -1618,4 +1619,4 @@ function loginPageShell(inner) {
 }
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Sky Home Living staff portal on :${PORT}`));
+app.listen(PORT, () => console.log(`${ORG.name} staff portal on :${PORT}`));
